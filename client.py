@@ -139,6 +139,42 @@ def cmd_unload(ip):
             print(f"   - {u}")
         print("🎮 VRAM cleared (0 MB AI overhead — GPU ready for gaming).")
 
+def read_input_stream(prompt_arg: str = None, file_arg: str = None) -> str:
+    """
+    Safely reads input from arguments, files, or stdin pipes into an immutable buffer.
+    Prevents double-read stalls and stream exhaustion on FIFOs/named pipes.
+    Combines piped input with prompt instructions when both are provided.
+    """
+    piped_data = ""
+    # Check if data is being piped into stdin without blocking if terminal is interactive
+    if not sys.stdin.isatty():
+        try:
+            piped_data = sys.stdin.read().strip()
+        except Exception:
+            piped_data = ""
+
+    file_data = ""
+    if file_arg:
+        p = Path(file_arg)
+        if not p.exists():
+            print(f"❌ File not found: {file_arg}")
+            return None
+        file_data = p.read_text(encoding="utf-8", errors="replace")
+
+    # Combine sources intelligently
+    sections = []
+    if file_data:
+        sections.append(f"### Attached File ({Path(file_arg).name}):\n```\n{file_data}\n```")
+    if piped_data:
+        sections.append(f"### Piped Input:\n```\n{piped_data}\n```")
+    if prompt_arg:
+        sections.append(f"### Instruction:\n{prompt_arg}")
+
+    if not sections:
+        return None
+
+    return "\n\n".join(sections)
+
 def dispatch_workload(
     prompt: str,
     ip: str = None,
@@ -325,18 +361,15 @@ def main():
     elif args.subcommand == "bench":
         cmd_bench(tower_ip, model=args.model)
     elif args.subcommand in ("run", "infer", "ask"):
-        prompt_text = args.prompt
+        prompt_text = read_input_stream(prompt_arg=args.prompt, file_arg=args.file)
         if not prompt_text:
-            if not sys.stdin.isatty():
-                prompt_text = sys.stdin.read().strip()
-            else:
-                print("❌ Missing prompt. Usage: lukk-tower run \"Prompt...\" or 'cat file | lukk-tower run'")
-                sys.exit(1)
+            print("❌ Missing prompt or piped input. Usage: lukk-tower run \"Prompt...\" or 'cat file | lukk-tower run'")
+            sys.exit(1)
 
         dispatch_workload(
             prompt=prompt_text,
             ip=tower_ip,
-            file_path=args.file,
+            file_path=None,  # Already integrated into immutable prompt_text
             model=args.model,
             profile=args.profile,
             unload_after=args.unload,
