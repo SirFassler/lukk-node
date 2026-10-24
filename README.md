@@ -1,5 +1,7 @@
 # 🛰️ LUKK-NODE: Remote GPU Telemetry & Local LLM Orchestrator
 
+**[Read in English](README.md)** | [Leer en Español](README.es.md)
+
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Zero Dependencies](https://img.shields.io/badge/dependencies-stdlib%20only-brightgreen.svg)]()
