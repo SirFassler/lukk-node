@@ -145,16 +145,44 @@ The satellite daemon (`server.py`) listens on port `9876` and exposes:
 
 | Method | Endpoint | Description |
 | :--- | :--- | :--- |
-| `GET` | `/health` | Heartbeat & node hostname. |
-| `GET` | `/telemetry` | Full GPU stats (nvidia-smi) + active Ollama models. |
+| `GET` | `/health` | Heartbeat, version & auth status (public). |
+| `GET` | `/telemetry` | Full GPU stats (nvidia-smi with 1.0s TTL cache) + active Ollama models. |
 | `GET` | `/models` | List all models installed on the node. |
 | `POST` | `/unload` | Immediate VRAM eviction (`keep_alive: 0`). |
 | `POST` | `/infer` | Delegated inference with live NDJSON streaming or buffered JSON. |
 
 ---
 
+## 🔐 Security & Bearer Token Authentication (v1.2.0)
+
+`lukk-node` supports optional, zero-dependency Bearer token authentication to protect your node across LANs or Tailscale networks from unauthorized requests or browser-based CSRF attacks:
+
+1. **Start the server with a token:**
+   ```bash
+   python3 server.py --token "your-secret-token"
+   # or via environment variable:
+   export LUKK_NODE_TOKEN="your-secret-token"
+   python3 server.py
+   ```
+
+2. **Configure your CLI client:**
+   ```bash
+   lukk-tower set-token "your-secret-token"
+   # or pass per command:
+   lukk-tower --token "your-secret-token" status
+   ```
+
+3. **Auto-Gaming Sentinel (Zero-Touch Detection):**
+   Automatically scan for running games (e.g. `cs2.exe`, `valorant.exe`, `eldenring.exe`) every 4 seconds and evict VRAM immediately without manual commands:
+   ```bash
+   python3 server.py --auto-gaming
+   # or set LUKK_AUTO_GAMING=1
+   ```
+
+---
+
 ## 🔒 Security & Privacy Notice
-`lukk-node` binds to local network interfaces (`0.0.0.0:9876`). It is intended for private LANs, Tailscale mesh networks, or localhost bridges. Never expose port 9876 directly to the public internet without an authenticating reverse proxy or VPN.
+`lukk-node` binds to local network interfaces (`0.0.0.0:9876` by default, customizable via `--host`). It is intended for private LANs, Tailscale mesh networks, or localhost bridges. For untrusted local networks, always enable `--token` or bind directly to your Tailscale IP (`--host 100.x.y.z`).
 
 ---
 

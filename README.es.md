@@ -145,16 +145,44 @@ El satélite (`server.py`) escucha en el puerto `9876` y expone:
 
 | Método | Endpoint | Descripción |
 | :--- | :--- | :--- |
-| `GET` | `/health` | Estado del servicio y nombre del nodo. |
-| `GET` | `/telemetry` | Telemetría completa de GPU (`nvidia-smi`) + modelos activos en Ollama. |
+| `GET` | `/health` | Estado del servicio, versión del nodo y autenticación (público). |
+| `GET` | `/telemetry` | Telemetría completa de GPU (`nvidia-smi` con caché TTL de 1.0s) + modelos activos en Ollama. |
 | `GET` | `/models` | Lista todos los modelos descargados en el nodo. |
 | `POST` | `/unload` | Desalojo forzado e inmediato de VRAM (`keep_alive: 0`). |
 | `POST` | `/infer` | Inferencia delegada con streaming NDJSON o respuesta JSON completa. |
 
 ---
 
+## 🔐 Seguridad y Autenticación Bearer Token (v1.2.0)
+
+`lukk-node` incluye autenticación por Bearer Token (sin librerías externas) para blindar el nodo en redes LAN o Tailscale contra accesos indebidos o peticiones CSRF desde navegadores:
+
+1. **Iniciar el servidor con token:**
+   ```bash
+   python3 server.py --token "tu-token-secreto"
+   # o mediante variable de entorno:
+   export LUKK_NODE_TOKEN="tu-token-secreto"
+   python3 server.py
+   ```
+
+2. **Configurar tu cliente CLI:**
+   ```bash
+   lukk-tower set-token "tu-token-secreto"
+   # o pasando el token por comando:
+   lukk-tower --token "tu-token-secreto" status
+   ```
+
+3. **Auto-Gaming Sentinel (Detección Cero-Toque):**
+   Monitorea en segundo plano cada 4 segundos ejecutables de juegos activos (como `cs2.exe`, `valorant.exe`, `eldenring.exe`) y desaloja automáticamente la VRAM sin que tengas que tipear comandos:
+   ```bash
+   python3 server.py --auto-gaming
+   # o exportando LUKK_AUTO_GAMING=1
+   ```
+
+---
+
 ## 🔒 Aviso de Seguridad y Red Privada
-`lukk-node` enlaza a las interfaces locales (`0.0.0.0:9876`). Está diseñado para redes locales privadas (LAN), redes malladas como Tailscale o enlaces localhost. Nunca expongas el puerto 9876 a internet público sin un proxy inverso con autenticación o una VPN.
+`lukk-node` enlaza a las interfaces locales (`0.0.0.0:9876` por defecto, configurable con `--host`). Está diseñado para redes locales privadas (LAN), redes malladas como Tailscale o enlaces localhost. En entornos de red no confiables, utiliza siempre `--token` o enlaza directamente a tu IP de Tailscale (`--host 100.x.y.z`).
 
 ---
 

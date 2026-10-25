@@ -3,6 +3,8 @@
 🛰️ LUKK-NODE CLI & WORKLOAD DISPATCHER
 Remote control, hardware telemetry monitor, and delegated LLM inference dispatcher
 for local GPU nodes running Ollama and NVIDIA GPUs.
+Zero external dependencies (Python 3 standard library only).
+Version: 1.2.0
 """
 
 import sys
@@ -32,11 +34,52 @@ def load_tower_ip():
     return os.environ.get("LUKK_NODE_HOST", "127.0.0.1")
 
 def save_tower_ip(ip: str):
-    """Saves the target GPU node IP to local configuration."""
+    """Saves the target GPU node IP to local configuration, preserving other settings."""
     CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    existing_lines = []
+    if CONFIG_FILE.exists():
+        try:
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                existing_lines = [l.strip() for l in f if not l.strip().startswith("TOWER_IP=")]
+        except Exception:
+            pass
+    existing_lines.append(f"TOWER_IP={ip}")
     with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-        f.write(f"TOWER_IP={ip}\n")
+        f.write("\n".join(existing_lines) + "\n")
     print(f"✅ Target node IP configured: {ip}")
+
+def load_tower_token():
+    """Loads the configured authentication token of the target GPU node."""
+    token = os.environ.get("LUKK_NODE_TOKEN", "").strip()
+    if token:
+        return token
+    if CONFIG_FILE.exists():
+        try:
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line.startswith("TOKEN="):
+                        val = line.split("=", 1)[1].strip()
+                        if val:
+                            return val
+        except Exception:
+            pass
+    return ""
+
+def save_tower_token(token: str):
+    """Saves the authentication token to local configuration, preserving other settings."""
+    CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    existing_lines = []
+    if CONFIG_FILE.exists():
+        try:
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                existing_lines = [l.strip() for l in f if not l.strip().startswith("TOKEN=")]
+        except Exception:
+            pass
+    existing_lines.append(f"TOKEN={token}")
+    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+        f.write("\n".join(existing_lines) + "\n")
+    print(f"✅ Target node token configured (length: {len(token)} chars).")
 
 def make_bar(percent, length=20):
     """Generates an ASCII progress bar."""
@@ -45,26 +88,52 @@ def make_bar(percent, length=20):
     bar = "█" * filled + "░" * (length - filled)
     return bar
 
-def query_tower(ip, path, method="GET", data=None, timeout=6):
-    """Executes an HTTP request to the remote satellite node."""
-    url = f"http://{ip}:9876{path}"
-    headers = {"User-Agent": "LukkNodeCLI/1.1", "Content-Type": "application/json"}
+def format_node_url(ip: str, path: str) -> str:
+    """Formats the node URL handling custom ports gracefully."""
+    ip = ip.strip()
+    if ip.startswith("http://") or ip.startswith("https://"):
+        base = ip.rstrip("/")
+    else:
+        if ":" in ip:
+            base = f"http://{ip}"
+        else:
+            base = f"http://{ip}:9876"
+    return f"{base}{path}"
+
+def query_tower(ip, path, method="GET", data=None, token=None, timeout=6):
+    """Executes an HTTP request to the remote satellite node with Bearer auth support."""
+    url = format_node_url(ip, path)
+    headers = {
+        "User-Agent": "LukkNodeCLI/1.2",
+        "Content-Type": "application/json"
+    }
+    auth_token = token or load_tower_token()
+    if auth_token:
+        headers["Authorization"] = f"Bearer {auth_token}"
+
     req_data = json.dumps(data).encode("utf-8") if data else None
     req = urllib.request.Request(url, data=req_data, headers=headers, method=method)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        try:
+            err_body = json.loads(e.read().decode("utf-8"))
+            return {"error": f"HTTP {e.code}: {err_body.get('error', e.reason)}"}
+        except Exception:
+            return {"error": f"HTTP {e.code}: {e.reason}"}
     except urllib.error.URLError as e:
         return {"error": f"Failed to connect to node ({url}): {e.reason}"}
     except Exception as e:
         return {"error": f"Unexpected communication error ({url}): {e}"}
 
-def cmd_status(ip):
+def cmd_status(ip, token=None):
     """Displays comprehensive hardware telemetry and loaded model state."""
-    res = query_tower(ip, "/telemetry")
+    res = query_tower(ip, "/telemetry", token=token)
     if "error" in res:
         print(f"\n❌ [CONNECTION ERROR] {res['error']}")
         print(f"👉 Ensure 'server.py' is running on target node ({ip}:9876).")
+        print(f"👉 If authentication is enabled, run: lukk-tower set-token <TOKEN>")
         print(f"👉 To reconfigure the node IP run: lukk-tower set-ip <NODE_IP>\n")
         return
 
@@ -98,45 +167,53 @@ def cmd_status(ip):
     print(f"--------------------------------------------------------")
 
     if not ollama.get("active"):
-        print("⚪ Ollama Runtime: Offline or unreachable on node.")
+        print("⚠️  Ollama daemon not responding on remote node.")
     else:
         loaded = ollama.get("loaded_models", [])
         if not loaded:
-            print("🟢 100% VRAM FREE (Gaming Mode Active — 0 models resident in VRAM).")
+            print("💤 No models currently residing in VRAM (0 MB AI consumption).")
         else:
             for m in loaded:
-                print(f"🟣 Active Model in VRAM: {m['name']} (Allocated: {m['size_vram_mb']} MB VRAM)")
+                print(f"🔥 Active Model:   {m['name']}")
+                print(f"   VRAM Allocated: {m['size_vram_mb']:.1f} MB (Total: {m['size_total_mb']:.1f} MB)")
+                print(f"   Eviction TTL:   {m.get('expires_at', 'standard')}")
+
     print(f"========================================================\n")
 
-def cmd_models(ip):
-    """Lists locally downloaded models in the node's storage."""
-    res = query_tower(ip, "/models")
+def cmd_models(ip, token=None):
+    """Lists locally downloaded models on the remote node."""
+    res = query_tower(ip, "/models", token=token)
     if "error" in res:
-        print(f"❌ Error querying models: {res['error']}")
+        print(f"❌ Error fetching models: {res['error']}")
         return
-
     models = res.get("models", [])
-    print(f"\n📦 AVAILABLE MODELS ON NODE ({ip}):")
-    print("-" * 55)
+    print(f"\n📦 Models installed on target node ({ip}):")
     if not models:
-        print("⚪ No downloaded models found in Ollama storage.")
-        print("💡 Download recommended model by running on the node:")
-        print("   ollama pull qwen2.5-coder:7b")
-    else:
-        for m in models:
-            print(f"  • {m['name']:<28} | {m.get('size_gb', 0):>5.2f} GB")
-    print("-" * 55 + "\n")
+        print("  (No models installed)")
+    for m in models:
+        print(f"  • {m['name']:<28} {m['size_gb']:>6.2f} GB  (Modified: {m.get('modified_at')[:10]})")
+    print("")
 
-def cmd_unload(ip):
-    """Immediately evicts all resident models from VRAM for gaming."""
-    print(f"⚡ Requesting immediate VRAM purge on node ({ip})...")
-    res = query_tower(ip, "/unload", method="POST")
+def cmd_unload(ip, token=None):
+    """Evicts all models from GPU VRAM to leave 100% memory for gaming."""
+    print(f"⚡ Requesting instant VRAM eviction from {ip}...")
+    res = query_tower(ip, "/unload", method="POST", data={}, token=token)
     if "error" in res:
-        print(f"❌ Error: {res['error']}")
+        print(f"❌ Failed to evict models: {res['error']}")
+        return
+    details = res.get("details", {})
+    unloaded = details.get("unloaded", [])
+    if unloaded:
+        print(f"✅ Evicted models from VRAM: {', '.join(unloaded)}")
     else:
-        print("✅ Models evicted successfully:")
-        for u in res.get("details", {}).get("unloaded", []):
-            print(f"   - {u}")
+        print("ℹ️ No active models were occupying VRAM.")
+
+    gpu = res.get("gpu_after_unload", {})
+    if "vram_free_mb" in gpu:
+        free_gb = gpu["vram_free_mb"] / 1024
+        total_gb = gpu["vram_total_mb"] / 1024
+        print(f"🎮 Free VRAM: {free_gb:.2f} GB / {total_gb:.2f} GB ready for gaming.")
+    else:
         print("🎮 VRAM cleared (0 MB AI overhead — GPU ready for gaming).")
 
 def read_input_stream(prompt_arg: str = None, file_arg: str = None) -> str:
@@ -146,7 +223,6 @@ def read_input_stream(prompt_arg: str = None, file_arg: str = None) -> str:
     Combines piped input with prompt instructions when both are provided.
     """
     piped_data = ""
-    # Check if data is being piped into stdin without blocking if terminal is interactive
     if not sys.stdin.isatty():
         try:
             piped_data = sys.stdin.read().strip()
@@ -161,7 +237,6 @@ def read_input_stream(prompt_arg: str = None, file_arg: str = None) -> str:
             return None
         file_data = p.read_text(encoding="utf-8", errors="replace")
 
-    # Combine sources intelligently
     sections = []
     if file_data:
         sections.append(f"### Attached File ({Path(file_arg).name}):\n```\n{file_data}\n```")
@@ -183,7 +258,8 @@ def dispatch_workload(
     profile: str = "code",
     unload_after: bool = False,
     stream: bool = True,
-    keep_alive: str = "1m"
+    keep_alive: str = "1m",
+    token: str = None
 ):
     """Dispatches delegated inference to the remote node with real-time streaming."""
     if not ip:
@@ -206,16 +282,27 @@ def dispatch_workload(
         "keep_alive": 0 if unload_after else keep_alive
     }
 
-    url = f"http://{ip}:9876/infer"
+    url = format_node_url(ip, "/infer")
     req_data = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(
-        url,
-        data=req_data,
-        headers={"Content-Type": "application/json", "User-Agent": "LukkNodeDispatcher/1.1"}
-    )
+    headers = {
+        "Content-Type": "application/json",
+        "User-Agent": "LukkNodeDispatcher/1.2"
+    }
+    auth_token = token or load_tower_token()
+    if auth_token:
+        headers["Authorization"] = f"Bearer {auth_token}"
+
+    req = urllib.request.Request(url, data=req_data, headers=headers)
 
     try:
         resp = urllib.request.urlopen(req, timeout=180)
+    except urllib.error.HTTPError as e:
+        try:
+            err_body = json.loads(e.read().decode("utf-8"))
+            print(f"\n❌ HTTP {e.code}: {err_body.get('error', e.reason)}")
+        except Exception:
+            print(f"\n❌ HTTP {e.code}: {e.reason}")
+        return None
     except urllib.error.URLError as e:
         print(f"\n❌ Failed to dispatch task to node ({url}): {e.reason}")
         print(f"Ensure target node ({ip}) has server.py and Ollama running.\n")
@@ -230,91 +317,85 @@ def dispatch_workload(
         _print_badge(telemetry, model)
         return response_text
 
-    # Real-time streaming
+    # Live streaming mode
     eval_count = 0
-    meta = {}
-
+    tps = 0.0
+    meta = None
     try:
-        for raw_line in resp:
-            line = raw_line.decode("utf-8").strip()
+        for line in resp:
             if not line:
                 continue
             try:
-                chunk = json.loads(line)
+                chunk = json.loads(line.decode("utf-8"))
+                if "response" in chunk:
+                    sys.stdout.write(chunk["response"])
+                    sys.stdout.flush()
+                if "lukk_telemetry" in chunk:
+                    meta = chunk["lukk_telemetry"]
             except Exception:
-                continue
-
-            if "response" in chunk:
-                sys.stdout.write(chunk["response"])
-                sys.stdout.flush()
-
-            if "lukk_telemetry" in chunk:
-                meta = chunk["lukk_telemetry"]
+                pass
     except KeyboardInterrupt:
-        print("\n\n[!] Inference interrupted by operator.")
-        return None
+        print("\n[!] Stream interrupted by user.")
+    print("")
 
-    print("\n")
     if meta:
         _print_badge(meta, model)
-    elif unload_after:
-        cmd_unload(ip)
 
-def _print_badge(meta, model):
-    """Prints a clean performance summary badge upon generation completion."""
-    tps = meta.get("tokens_per_second", 0)
-    tokens = meta.get("eval_count", 0)
-    duration = meta.get("total_duration_s", 0)
-    gpu = meta.get("gpu_after", {})
-    vram_used = (gpu.get("vram_used_mb", 0) / 1024) if "vram_used_mb" in gpu else 0
-    vram_tot = (gpu.get("vram_total_mb", 0) / 1024) if "vram_total_mb" in gpu else 8.0
-    temp = gpu.get("temperature_c", 0) if "temperature_c" in gpu else 0
+def _print_badge(telemetry, model):
+    """Outputs execution metrics."""
+    tps = telemetry.get("tokens_per_second", 0)
+    dur = telemetry.get("total_duration_s", 0)
+    count = telemetry.get("eval_count", 0)
+    gpu_after = telemetry.get("gpu_after", {})
+    temp = gpu_after.get("temperature_c", "-")
+    power = gpu_after.get("power_draw_w", "-")
 
-    badge = (
-        f"⚡ [{tps:.1f} tok/s | {tokens} tokens | {duration:.1f}s | "
-        f"VRAM: {vram_used:.1f}GB/{vram_tot:.1f}GB | {temp:.0f}°C | {model}]"
-    )
-    print(badge)
+    print(f"\n⚡ [{model}] {count} tokens | {tps} tok/s | {dur}s | 🌡️ {temp}°C | 🔌 {power}W")
 
-def cmd_bench(ip, model="qwen2.5-coder:7b"):
-    """Runs a throughput and latency benchmark on the target GPU node."""
-    print(f"\n🚀 EXECUTING THROUGHPUT BENCHMARK ON NODE ({ip}) WITH {model}...")
-    bench_prompt = (
-        "Implement an optimized binary search algorithm and a quicksort routine "
-        "in Python with full type annotations and concise docstrings."
-    )
+def cmd_bench(ip, model="qwen2.5-coder:7b", token=None):
+    """Performs a token-throughput speed benchmark on the remote GPU."""
+    print(f"\n🚀 Running throughput benchmark on {ip} with model '{model}'...")
+    test_prompt = "Write a fast, non-blocking Python async TCP server with connection pooling. Include explanations."
     dispatch_workload(
-        prompt=bench_prompt,
+        prompt=test_prompt,
         ip=ip,
         model=model,
         profile="code",
         unload_after=False,
-        stream=True
+        stream=True,
+        keep_alive="5m",
+        token=token
     )
-    print("\n✅ Benchmark completed.\n")
 
 def main():
-    parser = argparse.ArgumentParser(description="Lukk-Node CLI & Remote LLM Workload Dispatcher")
-    subparsers = parser.add_subparsers(dest="subcommand", help="Available subcommands")
+    parser = argparse.ArgumentParser(description="LUKK-NODE CLI: Remote NVIDIA GPU Telemetry & Local LLM Orchestrator")
+    parser.add_argument("--ip", default=None, help="Override node IP address")
+    parser.add_argument("--token", default=None, help="Override Bearer authentication token")
+
+    subparsers = parser.add_subparsers(dest="subcommand", help="Operational subcommands")
+
+    # set-ip
+    p_set_ip = subparsers.add_parser("set-ip", help="Set default target GPU node IP address")
+    p_set_ip.add_argument("ip_address", help="Target node IP (e.g. 192.168.100.X or Tailscale IP)")
+
+    # set-token
+    p_set_token = subparsers.add_parser("set-token", help="Set authentication token for target node")
+    p_set_token.add_argument("token_string", help="Bearer authentication token")
 
     # status
-    p_status = subparsers.add_parser("status", help="Display real-time hardware telemetry of target node")
+    p_status = subparsers.add_parser("status", help="Show remote GPU and Ollama hardware telemetry HUD")
     p_status.add_argument("--ip", default=None, help="Override node IP address")
 
     # ping
-    p_ping = subparsers.add_parser("ping", help="Verify network reachability of target node")
+    p_ping = subparsers.add_parser("ping", help="Check remote node health and connectivity")
     p_ping.add_argument("--ip", default=None, help="Override node IP address")
 
-    # set-ip
-    p_setip = subparsers.add_parser("set-ip", help="Configure target node IP address")
-    p_setip.add_argument("ip_address", help="Target node IP address (e.g., 192.168.1.50)")
-
     # models
-    p_models = subparsers.add_parser("models", help="List downloaded models in Ollama storage")
+    p_models = subparsers.add_parser("models", help="List installed models on remote node")
     p_models.add_argument("--ip", default=None, help="Override node IP address")
 
     # unload
-    p_unload = subparsers.add_parser("unload", help="Evict resident models from VRAM for gaming")
+    p_unload = subparsers.add_parser("unload", help="Force immediate eviction of all models from VRAM (Zero-VRAM Gaming Mode)")
     p_unload.add_argument("--ip", default=None, help="Override node IP address")
 
     # bench
@@ -337,29 +418,35 @@ def main():
     args = parser.parse_args()
 
     if not args.subcommand:
-        cmd_status(load_tower_ip())
+        cmd_status(load_tower_ip(), token=args.token)
         return
 
     if args.subcommand == "set-ip":
         save_tower_ip(args.ip_address)
         return
 
-    tower_ip = getattr(args, "ip", None) or load_tower_ip()
+    if args.subcommand == "set-token":
+        save_tower_token(args.token_string)
+        return
+
+    tower_ip = getattr(args, "ip", None) or args.ip or load_tower_ip()
+    token = args.token or load_tower_token()
 
     if args.subcommand == "status":
-        cmd_status(tower_ip)
+        cmd_status(tower_ip, token=token)
     elif args.subcommand == "ping":
-        res = query_tower(tower_ip, "/health")
+        res = query_tower(tower_ip, "/health", token=token)
         if "error" in res:
             print(f"❌ Connection error: {res['error']}")
         else:
-            print(f"✅ Node online: {res.get('node')} (status: {res.get('status')}, ver: {res.get('version')})")
+            auth_str = " (Auth: Required)" if res.get("authenticated") else " (Auth: None)"
+            print(f"✅ Node online: {res.get('node')} (status: {res.get('status')}, ver: {res.get('version')}){auth_str}")
     elif args.subcommand == "models":
-        cmd_models(tower_ip)
+        cmd_models(tower_ip, token=token)
     elif args.subcommand == "unload":
-        cmd_unload(tower_ip)
+        cmd_unload(tower_ip, token=token)
     elif args.subcommand == "bench":
-        cmd_bench(tower_ip, model=args.model)
+        cmd_bench(tower_ip, model=args.model, token=token)
     elif args.subcommand in ("run", "infer", "ask"):
         prompt_text = read_input_stream(prompt_arg=args.prompt, file_arg=args.file)
         if not prompt_text:
@@ -369,12 +456,13 @@ def main():
         dispatch_workload(
             prompt=prompt_text,
             ip=tower_ip,
-            file_path=None,  # Already integrated into immutable prompt_text
+            file_path=None,
             model=args.model,
             profile=args.profile,
             unload_after=args.unload,
             stream=not args.no_stream,
-            keep_alive=args.keep_alive
+            keep_alive=args.keep_alive,
+            token=token
         )
 
 if __name__ == "__main__":

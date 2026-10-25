@@ -5,6 +5,7 @@ Lightweight satellite agent for NVIDIA GPU telemetry and Ollama model orchestrat
 Zero external dependencies (Python 3 standard library only).
 Cross-platform: Windows and Linux.
 Default port: 9876
+Version: 1.2.0
 """
 
 import sys
@@ -13,12 +14,41 @@ import json
 import socket
 import subprocess
 import time
+import threading
 import urllib.request
 import urllib.error
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from pathlib import Path
+from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 
 PORT = int(os.environ.get("LUKK_NODE_PORT", 9876))
+HOST = os.environ.get("LUKK_NODE_HOST", "0.0.0.0")
 OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434")
+CONFIG_FILE = Path.home() / ".config" / "lukk" / "tower.conf"
+
+def load_auth_token():
+    """Loads authentication token from environment or configuration file if present."""
+    token = os.environ.get("LUKK_NODE_TOKEN", "").strip()
+    if token:
+        return token
+    if CONFIG_FILE.exists():
+        try:
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line.startswith("TOKEN="):
+                        val = line.split("=", 1)[1].strip()
+                        if val:
+                            return val
+        except Exception:
+            pass
+    return ""
+
+NODE_TOKEN = load_auth_token()
+
+# Telemetry Cache (reduces nvidia-smi subprocess overhead)
+_GPU_CACHE = {"data": None, "timestamp": 0.0}
+_GPU_CACHE_TTL = float(os.environ.get("LUKK_GPU_CACHE_TTL", 1.0))
+_CACHE_LOCK = threading.Lock()
 
 PROFILES = {
     "code": (
@@ -38,8 +68,23 @@ PROFILES = {
     "raw": ""
 }
 
-def get_gpu_telemetry():
-    """Queries real-time NVIDIA GPU telemetry using nvidia-smi."""
+COMMON_GAME_BINARIES = {
+    # Windows common executables
+    "cs2.exe", "valorant.exe", "dota2.exe", "overwatch.exe", "league of legends.exe",
+    "cyberpunk2077.exe", "eldenring.exe", "forzahorizon5.exe", "gta5.exe", "r5apex.exe",
+    "starfield.exe", "baldursgate3.exe", "helldivers2.exe", "destiny2.exe",
+    # Linux native / Proton processes
+    "cs2", "dota2", "retroarch"
+}
+
+def get_gpu_telemetry(force_refresh=False):
+    """Queries real-time NVIDIA GPU telemetry using nvidia-smi with TTL caching."""
+    global _GPU_CACHE
+    now = time.time()
+    with _CACHE_LOCK:
+        if not force_refresh and _GPU_CACHE["data"] is not None and (now - _GPU_CACHE["timestamp"]) < _GPU_CACHE_TTL:
+            return _GPU_CACHE["data"]
+
     try:
         cmd = [
             "nvidia-smi",
@@ -52,7 +97,7 @@ def get_gpu_telemetry():
             if len(parts) >= 6:
                 vram_used = float(parts[2])
                 vram_total = float(parts[3])
-                return {
+                data = {
                     "name": parts[0],
                     "gpu_utilization_pct": float(parts[1]),
                     "vram_used_mb": vram_used,
@@ -62,6 +107,10 @@ def get_gpu_telemetry():
                     "vram_free_mb": max(0.0, vram_total - vram_used),
                     "vram_used_pct": round((vram_used / vram_total) * 100, 1) if vram_total > 0 else 0.0
                 }
+                with _CACHE_LOCK:
+                    _GPU_CACHE["data"] = data
+                    _GPU_CACHE["timestamp"] = now
+                return data
     except Exception as e:
         return {"error": f"nvidia-smi unavailable: {e}"}
     return {"error": "No NVIDIA GPU detected"}
@@ -123,6 +172,44 @@ def unload_ollama_models(specific_model=None):
                 unloaded.append(f"{name} (error: {e})")
     return {"unloaded": unloaded}
 
+def auto_gaming_sentinel_worker(interval: float = 4.0):
+    """
+    Background sentinel thread: watches for active gaming processes and
+    automatically evicts models from VRAM to preserve gaming performance.
+    """
+    while True:
+        try:
+            ollama = get_ollama_status()
+            if ollama.get("active") and ollama.get("loaded_models"):
+                game_detected = False
+                if sys.platform == "win32":
+                    try:
+                        out = subprocess.check_output(["tasklist", "/FO", "CSV", "/NH"], text=True, errors="ignore")
+                        for line in out.splitlines():
+                            proc = line.split(",")[0].strip('"').lower()
+                            if proc in COMMON_GAME_BINARIES:
+                                game_detected = proc
+                                break
+                    except Exception:
+                        pass
+                else:
+                    try:
+                        out = subprocess.check_output(["ps", "-A", "-o", "comm="], text=True, errors="ignore")
+                        for proc in out.splitlines():
+                            proc = proc.strip().lower()
+                            if proc in COMMON_GAME_BINARIES:
+                                game_detected = proc
+                                break
+                    except Exception:
+                        pass
+
+                if game_detected:
+                    print(f"🎮 [Auto-Gaming Sentinel] Detected active game process '{game_detected}'! Evicting VRAM...")
+                    unload_ollama_models()
+        except Exception:
+            pass
+        time.sleep(interval)
+
 class NodeHandler(BaseHTTPRequestHandler):
     def _send_json(self, status_code, data):
         self.send_response(status_code)
@@ -131,22 +218,44 @@ class NodeHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(json.dumps(data, indent=2).encode("utf-8"))
 
+    def _check_auth(self) -> bool:
+        """Validates Bearer token authentication if NODE_TOKEN is set."""
+        if not NODE_TOKEN:
+            return True
+        auth = self.headers.get("Authorization", "").strip()
+        expected = f"Bearer {NODE_TOKEN}"
+        if auth == expected:
+            return True
+        self._send_json(401, {
+            "error": "Unauthorized: Invalid or missing Bearer token",
+            "hint": "Set header 'Authorization: Bearer <TOKEN>' or configure token in ~/.config/lukk/tower.conf"
+        })
+        return False
+
     def do_OPTIONS(self):
         self.send_response(204)
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
         self.end_headers()
 
     def do_GET(self):
+        # Health check is public for ping / connection tests
         if self.path in ("/", "/health"):
             self._send_json(200, {
                 "status": "ok",
                 "node": socket.gethostname(),
                 "service": "lukk-node",
-                "version": "1.1.0"
+                "version": "1.2.0",
+                "authenticated": bool(NODE_TOKEN)
             })
-        elif self.path == "/telemetry":
+            return
+
+        # Protected endpoints require auth if NODE_TOKEN is configured
+        if not self._check_auth():
+            return
+
+        if self.path == "/telemetry":
             gpu = get_gpu_telemetry()
             ollama = get_ollama_status()
             self._send_json(200, {
@@ -162,6 +271,9 @@ class NodeHandler(BaseHTTPRequestHandler):
             self._send_json(404, {"error": "Route not found"})
 
     def do_POST(self):
+        if not self._check_auth():
+            return
+
         if self.path == "/unload":
             specific_model = None
             try:
@@ -173,7 +285,7 @@ class NodeHandler(BaseHTTPRequestHandler):
                 pass
             res = unload_ollama_models(specific_model)
             time.sleep(0.5)
-            gpu = get_gpu_telemetry()
+            gpu = get_gpu_telemetry(force_refresh=True)
             self._send_json(200, {
                 "status": "unloaded",
                 "details": res,
@@ -265,7 +377,7 @@ class NodeHandler(BaseHTTPRequestHandler):
                 pass
             finally:
                 t_total = time.perf_counter() - t_start
-                gpu_after = get_gpu_telemetry()
+                gpu_after = get_gpu_telemetry(force_refresh=True)
                 tps = (eval_count / (eval_duration / 1e9)) if eval_duration > 0 else 0.0
                 meta_event = {
                     "lukk_telemetry": {
@@ -293,7 +405,7 @@ class NodeHandler(BaseHTTPRequestHandler):
             eval_count = full_data.get("eval_count", 0)
             eval_duration = full_data.get("eval_duration", 0)
             tps = (eval_count / (eval_duration / 1e9)) if eval_duration > 0 else 0.0
-            gpu_after = get_gpu_telemetry()
+            gpu_after = get_gpu_telemetry(force_refresh=True)
 
             if str(keep_alive).strip() in ("0", "0s", "0m"):
                 unload_ollama_models(model)
@@ -314,8 +426,25 @@ class NodeHandler(BaseHTTPRequestHandler):
         return
 
 def main():
-    server_address = ("0.0.0.0", PORT)
-    httpd = HTTPServer(server_address, NodeHandler)
+    global NODE_TOKEN, HOST, PORT
+    import argparse
+    parser = argparse.ArgumentParser(description="LUKK-NODE: Remote GPU Telemetry & Local LLM Orchestration Server")
+    parser.add_argument("--host", default=HOST, help="Host/IP address to bind (default: 0.0.0.0)")
+    parser.add_argument("--port", "-p", type=int, default=PORT, help=f"Port to listen on (default: {PORT})")
+    parser.add_argument("--token", default=None, help="Bearer authentication token (overrides environment/config)")
+    parser.add_argument("--auto-gaming", action="store_true", default=bool(os.environ.get("LUKK_AUTO_GAMING")),
+                        help="Enable background sentinel to automatically evict VRAM when games launch")
+    args = parser.parse_args()
+
+    if args.token:
+        NODE_TOKEN = args.token.strip()
+    HOST = args.host
+    PORT = args.port
+
+    server_address = (HOST, PORT)
+    httpd = ThreadingHTTPServer(server_address, NodeHandler)
+    httpd.daemon_threads = True
+
     host_ip = "127.0.0.1"
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -325,12 +454,20 @@ def main():
     except Exception:
         pass
 
+    if args.auto_gaming:
+        sentinel = threading.Thread(target=auto_gaming_sentinel_worker, daemon=True, name="LukkAutoGamingSentinel")
+        sentinel.start()
+
+    auth_status = f"Enforced (length: {len(NODE_TOKEN)} chars)" if NODE_TOKEN else "Disabled (Open Access)"
+    gaming_status = "Active (Scanning for games)" if args.auto_gaming else "Disabled (Use --auto-gaming to enable)"
+
     print("==================================================")
-    print("🛰️  LUKK-NODE: Remote GPU Telemetry & Inference Server v1.1.0")
+    print("🛰️  LUKK-NODE: Remote GPU Telemetry & Inference Server v1.2.0")
     print(f"📡 Listening on:   http://{host_ip}:{PORT}")
-    print(f"🎮 GPU Backend:    nvidia-smi")
+    print(f"⚡ Concurrency:    ThreadingHTTPServer (Non-blocking)")
+    print(f"🔐 Authentication: {auth_status}")
+    print(f"🎮 Auto-Gaming:    {gaming_status}")
     print(f"🧠 Ollama Host:    {OLLAMA_HOST}")
-    print("⚡ Endpoints:      /telemetry, /infer, /unload, /models")
     print("🛑 Press Ctrl+C to stop.")
     print("==================================================")
 
