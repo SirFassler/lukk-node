@@ -291,6 +291,32 @@ class NodeHandler(BaseHTTPRequestHandler):
                 "details": res,
                 "gpu_after_unload": gpu
             })
+        elif self.path == "/power/shutdown":
+            self._send_json(200, {
+                "status": "shutting_down",
+                "message": "Node initiating host system shutdown sequence in 2 seconds."
+            })
+            def _delayed_shutdown():
+                time.sleep(2)
+                if sys.platform == "win32":
+                    subprocess.run(["shutdown", "/s", "/t", "1"], capture_output=True)
+                else:
+                    subprocess.run(["systemctl", "poweroff"], capture_output=True)
+            threading.Thread(target=_delayed_shutdown, daemon=True, name="ShutdownWorker").start()
+
+        elif self.path == "/power/sleep":
+            self._send_json(200, {
+                "status": "suspending",
+                "message": "Node initiating host system sleep/suspend mode in 2 seconds."
+            })
+            def _delayed_sleep():
+                time.sleep(2)
+                if sys.platform == "win32":
+                    subprocess.run(["rundll32.exe", "powrprof.dll,SetSuspendState", "0,1,0"], capture_output=True)
+                else:
+                    subprocess.run(["systemctl", "suspend"], capture_output=True)
+            threading.Thread(target=_delayed_sleep, daemon=True, name="SleepWorker").start()
+
         elif self.path in ("/infer", "/dispatch"):
             self._handle_infer()
         else:

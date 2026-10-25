@@ -10,6 +10,7 @@ Version: 1.2.0
 import sys
 import os
 import json
+import socket
 import argparse
 import urllib.request
 import urllib.error
@@ -47,6 +48,36 @@ def save_tower_ip(ip: str):
     with open(CONFIG_FILE, "w", encoding="utf-8") as f:
         f.write("\n".join(existing_lines) + "\n")
     print(f"✅ Target node IP configured: {ip}")
+
+def load_tower_mac() -> str:
+    """Loads the configured MAC address of the target GPU node."""
+    if CONFIG_FILE.exists():
+        try:
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line.startswith("TOWER_MAC="):
+                        val = line.split("=", 1)[1].strip()
+                        if val:
+                            return val
+        except Exception:
+            pass
+    return os.environ.get("LUKK_NODE_MAC", "9c:6b:00:a0:42:89")
+
+def save_tower_mac(mac: str):
+    """Saves the target GPU node MAC to local configuration, preserving other settings."""
+    CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    existing_lines = []
+    if CONFIG_FILE.exists():
+        try:
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                existing_lines = [l.strip() for l in f if not l.strip().startswith("TOWER_MAC=")]
+        except Exception:
+            pass
+    existing_lines.append(f"TOWER_MAC={mac}")
+    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+        f.write("\n".join(existing_lines) + "\n")
+    print(f"✅ Target node MAC configured: {mac}")
 
 def load_tower_token():
     """Loads the configured authentication token of the target GPU node."""
@@ -367,6 +398,35 @@ def cmd_bench(ip, model="qwen2.5-coder:7b", token=None):
         token=token
     )
 
+def cmd_power(action: str, ip: str, token: str = None):
+    """Sends a remote shutdown or sleep command to target node."""
+    endpoint = f"/power/{action}"
+    print(f"📡 Sending remote '{action}' instruction to target node ({ip})...")
+    res = fetch_json(ip, endpoint, method="POST", data={}, token=token)
+    if "error" in res:
+        print(f"❌ Failed to execute {action}: {res.get('error')}")
+    else:
+        print(f"🛑 {res.get('message', 'Command executed successfully.')}")
+
+def cmd_wol(mac: str = None):
+    """Broadcasts a Wake-on-LAN magic packet across the network to wake the node."""
+    target_mac = mac or load_tower_mac()
+    clean_mac = target_mac.replace(":", "").replace("-", "").replace(".", "").strip()
+    if len(clean_mac) != 12:
+        print(f"❌ Error: Invalid MAC address format '{target_mac}'. Expected 12 hex digits.")
+        return
+    try:
+        packet = bytes.fromhex("FF" * 6 + clean_mac * 16)
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+            # Send to standard broadcast and common subnet broadcast
+            s.sendto(packet, ("255.255.255.255", 9))
+            s.sendto(packet, ("192.168.100.255", 9))
+        print(f"⚡ Wake-on-LAN magic packet broadcasted successfully to MAC: {target_mac}")
+        print("⏳ Host hardware initiating power-on sequence. Check with 'lukk-tower ping' in ~10-15s.")
+    except Exception as e:
+        print(f"❌ Failed to dispatch WoL packet: {e}")
+
 def main():
     parser = argparse.ArgumentParser(description="LUKK-NODE CLI: Remote NVIDIA GPU Telemetry & Local LLM Orchestrator")
     parser.add_argument("--ip", default=None, help="Override node IP address")
@@ -381,6 +441,24 @@ def main():
     # set-token
     p_set_token = subparsers.add_parser("set-token", help="Set authentication token for target node")
     p_set_token.add_argument("token_string", help="Bearer authentication token")
+
+    # set-mac
+    p_set_mac = subparsers.add_parser("set-mac", help="Set hardware MAC address for Wake-on-LAN")
+    p_set_mac.add_argument("mac_address", help="Target node MAC address (e.g. 9c:6b:00:a0:42:89)")
+
+    # wake / wol
+    for wake_cmd in ("wake", "wol"):
+        p_wake = subparsers.add_parser(wake_cmd, help="Wake remote node via Wake-on-LAN magic packet")
+        p_wake.add_argument("--mac", default=None, help="Override target node MAC address")
+
+    # shutdown
+    p_shutdown = subparsers.add_parser("shutdown", help="Send remote power-off command to host machine")
+    p_shutdown.add_argument("--ip", default=None, help="Override node IP address")
+
+    # sleep / suspend
+    for sleep_cmd in ("sleep", "suspend"):
+        p_sleep = subparsers.add_parser(sleep_cmd, help="Send remote sleep/suspend command to host machine")
+        p_sleep.add_argument("--ip", default=None, help="Override node IP address")
 
     # status
     p_status = subparsers.add_parser("status", help="Show remote GPU and Ollama hardware telemetry HUD")
@@ -429,8 +507,24 @@ def main():
         save_tower_token(args.token_string)
         return
 
+    if args.subcommand == "set-mac":
+        save_tower_mac(args.mac_address)
+        return
+
+    if args.subcommand in ("wake", "wol"):
+        cmd_wol(getattr(args, "mac", None))
+        return
+
     tower_ip = getattr(args, "ip", None) or args.ip or load_tower_ip()
     token = args.token or load_tower_token()
+
+    if args.subcommand == "shutdown":
+        cmd_power("shutdown", tower_ip, token=token)
+        return
+
+    if args.subcommand in ("sleep", "suspend"):
+        cmd_power("sleep", tower_ip, token=token)
+        return
 
     if args.subcommand == "status":
         cmd_status(tower_ip, token=token)
