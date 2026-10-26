@@ -7,7 +7,8 @@ Set fso = CreateObject("Scripting.FileSystemObject")
 strDir = fso.GetParentFolderName(WScript.ScriptFullName)
 
 WshShell.CurrentDirectory = strDir
-WshShell.Run "python server.py --auto-gaming", 0, False
+' Uses py launcher first, falls back to python
+WshShell.Run "py server.py --auto-gaming", 0, False
 
 Set WshShell = Nothing
 Set fso = Nothing
