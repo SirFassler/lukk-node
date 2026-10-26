@@ -5,18 +5,31 @@ echo  🛰️  LUKK-NODE: Instalador de Inicio Invisible en Segundo Plano
 echo ==============================================================================
 
 set SCRIPT_DIR=%~dp0
-set VBS_TARGET=%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\LukkNode.vbs
+set SHORTCUT=%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\LukkNode.lnk
 
-copy /Y "%SCRIPT_DIR%start-headless.vbs" "%VBS_TARGET%" >nul
+:: Eliminar archivo vbs viejo si existía
+if exist "%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\LukkNode.vbs" (
+    del /f /q "%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\LukkNode.vbs" >nul 2>&1
+)
+
+:: Crear acceso directo con WorkingDirectory apuntando a la carpeta de lukk-node
+powershell -NoProfile -Command ^
+    "$ws = New-Object -ComObject WScript.Shell; " ^
+    "$s = $ws.CreateShortcut('%SHORTCUT%'); " ^
+    "$s.TargetPath = 'wscript.exe'; " ^
+    "$s.Arguments = '\"%SCRIPT_DIR%start-headless.vbs\"'; " ^
+    "$s.WorkingDirectory = '%SCRIPT_DIR%'; " ^
+    "$s.WindowStyle = 7; " ^
+    "$s.Save()"
 
 if %ERRORLEVEL% EQU 0 (
-    echo [OK] Servicio configurado exitosamente en la carpeta de Inicio de Windows.
-    echo      Ruta: %VBS_TARGET%
+    echo [OK] Acceso directo permanente creado en: %SHORTCUT%
+    echo      Directorio de trabajo: %SCRIPT_DIR%
     echo.
-    echo ✅ A partir de ahora, lukk-node arrancara de forma 100%% invisible al encender
-    echo    tu PC, consumiendo solo ~28 MB de RAM y sin ventanas de consola abiertas.
+    echo ✅ A partir de ahora, lukk-node arrancará de forma 100%% automática e invisible
+    echo    cada vez que enciendas la torre, sin ventanas y consumiendo ~28 MB de RAM.
 ) else (
-    echo [ERROR] No se pudo copiar el archivo al inicio de Windows.
+    echo [ERROR] No se pudo crear el acceso directo de inicio.
 )
 
 echo ==============================================================================
