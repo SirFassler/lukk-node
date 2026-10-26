@@ -30,17 +30,19 @@ def load_auth_token():
     token = os.environ.get("LUKK_NODE_TOKEN", "").strip()
     if token:
         return token
-    if CONFIG_FILE.exists():
-        try:
-            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if line.startswith("TOKEN="):
-                        val = line.split("=", 1)[1].strip()
-                        if val:
-                            return val
-        except Exception:
-            pass
+    # Check both ~/.config/lukk/tower.conf and local ./tower.conf
+    for conf_path in (CONFIG_FILE, Path(__file__).resolve().parent / "tower.conf"):
+        if conf_path.exists():
+            try:
+                with open(conf_path, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if line.startswith("TOKEN="):
+                            val = line.split("=", 1)[1].strip()
+                            if val:
+                                return val
+            except Exception:
+                pass
     return ""
 
 NODE_TOKEN = load_auth_token()
