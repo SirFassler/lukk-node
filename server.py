@@ -73,8 +73,11 @@ COMMON_GAME_BINARIES = {
     "cs2.exe", "valorant.exe", "dota2.exe", "overwatch.exe", "league of legends.exe",
     "cyberpunk2077.exe", "eldenring.exe", "forzahorizon5.exe", "gta5.exe", "r5apex.exe",
     "starfield.exe", "baldursgate3.exe", "helldivers2.exe", "destiny2.exe",
+    "rocketleague.exe", "re4.exe", "re4remake.exe", "re7.exe", "re8.exe",
+    "deadspace.exe", "witcher3.exe", "hogwartslegacy.exe", "monsterhunterrise.exe",
+    "fortniteclient-win64-shipping.exe", "genshinimpact.exe", "starrail.exe",
     # Linux native / Proton processes
-    "cs2", "dota2", "retroarch"
+    "cs2", "dota2", "retroarch", "rocketleague"
 }
 
 def get_gpu_telemetry(force_refresh=False):
@@ -203,8 +206,14 @@ def auto_gaming_sentinel_worker(interval: float = 4.0):
                     except Exception:
                         pass
 
+                if not game_detected:
+                    # Heurística dinámica: si la GPU está siendo exigida por un juego/app pesada no listada
+                    gpu = get_gpu_telemetry()
+                    if gpu.get("load_pct", 0) > 75.0:
+                        game_detected = f"High External GPU Load ({gpu['load_pct']}%)"
+
                 if game_detected:
-                    print(f"🎮 [Auto-Gaming Sentinel] Detected active game process '{game_detected}'! Evicting VRAM...")
+                    print(f"🎮 [Auto-Gaming Sentinel] Detected active game/graphics load: '{game_detected}'! Evicting VRAM...")
                     unload_ollama_models()
         except Exception:
             pass
