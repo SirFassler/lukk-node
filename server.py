@@ -76,8 +76,10 @@ COMMON_GAME_BINARIES = {
     "rocketleague.exe", "re4.exe", "re4remake.exe", "re7.exe", "re8.exe",
     "deadspace.exe", "witcher3.exe", "hogwartslegacy.exe", "monsterhunterrise.exe",
     "fortniteclient-win64-shipping.exe", "genshinimpact.exe", "starrail.exe",
+    "javaw.exe", "java.exe", "minecraft.exe", "minecraft.windows.exe",
+    "geometrydash.exe", "geometry dash.exe",
     # Linux native / Proton processes
-    "cs2", "dota2", "retroarch", "rocketleague"
+    "cs2", "dota2", "retroarch", "rocketleague", "minecraft", "geometrydash"
 }
 
 def get_gpu_telemetry(force_refresh=False):
