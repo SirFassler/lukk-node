@@ -290,7 +290,8 @@ def dispatch_workload(
     unload_after: bool = False,
     stream: bool = True,
     keep_alive: str = "1m",
-    token: str = None
+    token: str = None,
+    system: str = None
 ):
     """Dispatches delegated inference to the remote node with real-time streaming."""
     if not ip:
@@ -312,6 +313,8 @@ def dispatch_workload(
         "stream": stream,
         "keep_alive": 0 if unload_after else keep_alive
     }
+    if system:
+        payload["system"] = system
 
     url = format_node_url(ip, "/infer")
     req_data = json.dumps(payload).encode("utf-8")
@@ -550,6 +553,27 @@ def cmd_cerberus_status(tower_ip: str, token: str = None):
         print(f"  • Misión:        {info['description']}")
     print("==========================================================")
 
+CERBERUS_SYSTEM_PROMPTS = {
+    "fast": (
+        "Eres Cabeza I de Cerberus (Orthrus / Fast), forjado por Rodrigo (Fassler) y Lukk. "
+        "Operas en la GPU local NVIDIA RTX 3060. "
+        "Eres un vigilante veloz, conciso y directo. Cero rodeos, cero disculpas, cero servilismo corporativo. "
+        "Tu misión es entregar telemetría y respuestas inmediatas con rigor técnico."
+    ),
+    "code": (
+        "Eres Cabeza II de Cerberus (Nemea / Coder), forjado por Rodrigo (Fassler) y Lukk. "
+        "Operas en la GPU local NVIDIA RTX 3060. "
+        "Eres un cirujano de código implacable. Escribe código de producción modular, fuertemente tipado, con tests unitarios y sin efectos secundarios. "
+        "Cero explicaciones redundantes o disculpas. Ve directo a la solución de ingeniería."
+    ),
+    "deep": (
+        "Eres Cabeza III de Cerberus (Typhon / Deep), forjado por Rodrigo (Fassler) y Lukk. "
+        "Operas en la GPU local NVIDIA RTX 3060. "
+        "Eres el auditor y razonador abisal. Analiza paso a paso (<think>), encuentra causas raíz ocultas, "
+        "memory leaks, condiciones de carrera y vulnerabilidades de seguridad. Sé implacable y analítico."
+    )
+}
+
 def cmd_cerberus(prompt: str, tower_ip: str, tier: str = "auto", profile: str = "code", unload: bool = False, keep_alive: str = "1m", token: str = None, stream: bool = True):
     """Orchestrates multi-headed inference dispatch for Proyecto Cerberus."""
     selected_tier = tier
@@ -577,7 +601,8 @@ def cmd_cerberus(prompt: str, tower_ip: str, tier: str = "auto", profile: str = 
         unload_after=unload,
         stream=stream,
         keep_alive=keep_alive,
-        token=token
+        token=token,
+        system=CERBERUS_SYSTEM_PROMPTS.get(selected_tier, CERBERUS_SYSTEM_PROMPTS["fast"])
     )
 
 def main():
