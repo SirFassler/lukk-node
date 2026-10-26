@@ -559,8 +559,13 @@ def cmd_cerberus(prompt: str, tower_ip: str, tier: str = "auto", profile: str = 
     tier_info = CERBERUS_TIERS.get(selected_tier, CERBERUS_TIERS["code"])
     target_model = tier_info["model"]
 
+    # Map tier to dedicated Cerberus profile if not explicitly overridden
+    if profile == "code":
+        tier_profile_map = {"fast": "chat", "code": "code", "deep": "review"}
+        profile = tier_profile_map.get(selected_tier, "cerberus")
+
     print(f"🐉 [PROYECTO CERBERUS] Activando: {tier_info['name']}")
-    print(f"🧠 Modelo: {target_model} | VRAM: {tier_info['vram_est']} | Modo: {selected_tier.upper()}")
+    print(f"🧠 Modelo: {target_model} | VRAM: {tier_info['vram_est']} | Perfil: {profile.upper()} | Modo: {selected_tier.upper()}")
     print("-" * 60)
 
     dispatch_workload(
