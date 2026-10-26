@@ -343,8 +343,79 @@ class NodeHandler(BaseHTTPRequestHandler):
 
         elif self.path in ("/infer", "/dispatch"):
             self._handle_infer()
+        elif self.path in ("/pull", "/models/pull"):
+            self._handle_pull()
+        elif self.path == "/update":
+            self._handle_update()
         else:
             self._send_json(404, {"error": "Route not found"})
+
+    def _handle_pull(self):
+        """Streams Ollama model download progress to client in real-time NDJSON."""
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+            if length == 0:
+                self._send_json(400, {"error": "Empty request body"})
+                return
+            req_body = json.loads(self.rfile.read(length).decode("utf-8"))
+        except Exception as e:
+            self._send_json(400, {"error": f"Invalid JSON payload: {e}"})
+            return
+
+        model_name = req_body.get("name") or req_body.get("model")
+        if not model_name:
+            self._send_json(400, {"error": "Field 'name' or 'model' is required"})
+            return
+
+        ollama_payload = {"name": model_name, "stream": True}
+        data_bytes = json.dumps(ollama_payload).encode("utf-8")
+        ollama_req = urllib.request.Request(
+            f"{OLLAMA_HOST}/api/pull",
+            data=data_bytes,
+            headers={"Content-Type": "application/json"}
+        )
+
+        try:
+            resp = urllib.request.urlopen(ollama_req, timeout=1800)
+        except urllib.error.URLError as e:
+            self._send_json(502, {
+                "error": f"Failed to connect to Ollama runtime ({OLLAMA_HOST}): {e}",
+                "hint": "Ensure the Ollama daemon is active on the node."
+            })
+            return
+
+        self.send_response(200)
+        self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("X-Accel-Buffering", "no")
+        self.end_headers()
+
+        try:
+            for line in resp:
+                if not line:
+                    continue
+                self.wfile.write(line)
+                self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        except Exception:
+            pass
+
+    def _handle_update(self):
+        """Pulls git updates and restarts the lukk-node daemon asynchronously."""
+        def _delayed_restart():
+            time.sleep(1)
+            subprocess.run(["git", "pull"], capture_output=True)
+            if sys.platform == "win32":
+                subprocess.Popen(["py", "server.py", "--auto-gaming"])
+            else:
+                subprocess.Popen([sys.executable, "server.py", "--auto-gaming"])
+            os._exit(0)
+        threading.Thread(target=_delayed_restart, daemon=True, name="UpdateWorker").start()
+        self._send_json(200, {
+            "status": "updating",
+            "message": "Node pulling git updates and restarting daemon seamlessly."
+        })
 
     def _handle_infer(self):
         """Orchestrates delegated inference execution to Ollama with streaming or buffering."""

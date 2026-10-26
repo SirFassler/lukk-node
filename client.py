@@ -427,6 +427,154 @@ def cmd_wol(mac: str = None):
     except Exception as e:
         print(f"❌ Failed to dispatch WoL packet: {e}")
 
+# ==============================================================================
+# PROYECTO CERBERUS: 3-HEADED DYNAMIC SWARM ROUTER
+# ==============================================================================
+
+CERBERUS_TIERS = {
+    "fast": {
+        "model": "qwen2.5:1.5b",
+        "name": "Cabeza I (Vigilancia / Fast)",
+        "vram_est": "~0.98 GB",
+        "description": "Ultra liviano, latencia <200ms, coexistencia total con gaming."
+    },
+    "code": {
+        "model": "qwen2.5-coder:7b",
+        "name": "Cabeza II (Táctica / Code)",
+        "vram_est": "~4.36 GB",
+        "description": "Ingeniería de software, refactoring, tests y syntax de alta precisión."
+    },
+    "deep": {
+        "model": "deepseek-r1:7b",
+        "name": "Cabeza III (Profunda / Deep Reasoning)",
+        "vram_est": "~4.70 GB",
+        "description": "Razonamiento analítico profundo paso a paso (Chain-of-Thought)."
+    }
+}
+
+def classify_cerberus_tier(prompt: str, tower_ip: str = None, token: str = None) -> str:
+    """
+    Intelligent tier classifier for Proyecto Cerberus.
+    Decides target model in <5ms using prompt semantics and live GPU hardware awareness.
+    """
+    p_lower = prompt.lower()
+
+    # 1. Hardware Awareness: If GPU load on tower is heavy (> 70%), degrade elegantly to Fast
+    if tower_ip:
+        try:
+            telemetry = query_tower(tower_ip, "/telemetry", token=token)
+            gpu = telemetry.get("gpu", {})
+            load = gpu.get("gpu_utilization_pct", 0)
+            if load > 70.0:
+                print(f"🎮 [Cerberus Hardware Sentinel] GPU bajo carga activa ({load}%). Despachando a Cabeza 1 (Fast) para proteger rendimiento.")
+                return "fast"
+        except Exception:
+            pass
+
+    # 2. Deep Reasoning Indicators
+    deep_keywords = [
+        "por qué", "analiza en profundidad", "razona", "evalúa la arquitectura",
+        "root cause", "causa raíz", "teoría", "matemática", "demuestra",
+        "proof", "audit", "vulnerabilidad", "exploit", "chain of thought", "cot",
+        "seguridad ofensiva", "threat model", "modelo de amenazas"
+    ]
+    if any(k in p_lower for k in deep_keywords):
+        return "deep"
+
+    # 3. Code / Engineering Indicators
+    code_keywords = [
+        "def ", "class ", "function", "import ", "const ", "let ", "return ",
+        "traceback", "exception", "syntaxerror", "indexerror", "nullpointer",
+        "sql", "select ", "insert ", "update ", "delete from", "dockerfile",
+        "cmake", "cargo", "rust", "python", "typescript", "c++", "bash", "script",
+        "refactor", "bug", "fix", "patch", "pull request", "pr ", "endpoint", "api"
+    ]
+    if any(k in p_lower for k in code_keywords) or len(prompt) > 800:
+        return "code"
+
+    # 4. Short queries / General Chat -> Fast
+    return "fast"
+
+def cmd_pull(tower_ip: str, model_name: str, token: str = None):
+    """Pulls an Ollama model onto the remote tower node with live progress."""
+    print(f"📥 Dispatching pull request to node {tower_ip} for model '{model_name}'...")
+    url = f"http://{tower_ip}:{PORT}/pull"
+    payload = json.dumps({"name": model_name}).encode("utf-8")
+    headers = {"Content-Type": "application/json"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    req = urllib.request.Request(url, data=payload, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=1800) as resp:
+            last_status = ""
+            for line in resp:
+                if not line:
+                    continue
+                try:
+                    data = json.loads(line.decode("utf-8"))
+                    status = data.get("status", "")
+                    total = data.get("total", 0)
+                    completed = data.get("completed", 0)
+                    if total > 0:
+                        pct = (completed / total) * 100
+                        mb_done = completed / (1024 * 1024)
+                        mb_tot = total / (1024 * 1024)
+                        sys.stdout.write(f"\r📦 {status}: {mb_done:.1f}MB / {mb_tot:.1f}MB ({pct:.1f}%)   ")
+                        sys.stdout.flush()
+                    elif status != last_status:
+                        print(f"📦 {status}")
+                        last_status = status
+                except Exception:
+                    pass
+        print(f"\n✅ Model '{model_name}' successfully installed and ready on {tower_ip}!")
+    except Exception as e:
+        print(f"\n❌ Pull failed: {e}")
+
+def cmd_cerberus_status(tower_ip: str, token: str = None):
+    """Displays the status and readiness of all 3 heads of Cerberus."""
+    installed = query_tower(tower_ip, "/models", token=token)
+    models = [m.get("name", "") for m in installed.get("models", [])]
+    
+    print("==========================================================")
+    print("🐉  PROYECTO CERBERUS: ESTADO DEL ENJAMBRE DE 3 CABEZAS")
+    print(f"📡  Nodo: {tower_ip} (NVIDIA RTX 3060 8GB)")
+    print("==========================================================")
+    
+    for key, info in CERBERUS_TIERS.items():
+        target = info["model"]
+        ready = any(m == target or m.startswith(target) for m in models)
+        icon = "🟢 LISTA" if ready else f"🔴 NO INSTALADA (Descargar con: lukk-tower pull {target})"
+        print(f"\n* {info['name']}: {icon}")
+        print(f"  • Modelo Target: {info['model']}")
+        print(f"  • Huella VRAM:   {info['vram_est']}")
+        print(f"  • Misión:        {info['description']}")
+    print("==========================================================")
+
+def cmd_cerberus(prompt: str, tower_ip: str, tier: str = "auto", profile: str = "code", unload: bool = False, keep_alive: str = "1m", token: str = None, stream: bool = True):
+    """Orchestrates multi-headed inference dispatch for Proyecto Cerberus."""
+    selected_tier = tier
+    if selected_tier == "auto":
+        selected_tier = classify_cerberus_tier(prompt, tower_ip=tower_ip, token=token)
+
+    tier_info = CERBERUS_TIERS.get(selected_tier, CERBERUS_TIERS["code"])
+    target_model = tier_info["model"]
+
+    print(f"🐉 [PROYECTO CERBERUS] Activando: {tier_info['name']}")
+    print(f"🧠 Modelo: {target_model} | VRAM: {tier_info['vram_est']} | Modo: {selected_tier.upper()}")
+    print("-" * 60)
+
+    dispatch_workload(
+        prompt=prompt,
+        ip=tower_ip,
+        file_path=None,
+        model=target_model,
+        profile=profile,
+        unload_after=unload,
+        stream=stream,
+        keep_alive=keep_alive,
+        token=token
+    )
+
 def main():
     parser = argparse.ArgumentParser(description="LUKK-NODE CLI: Remote NVIDIA GPU Telemetry & Local LLM Orchestrator")
     parser.add_argument("--ip", default=None, help="Override node IP address")
@@ -481,12 +629,37 @@ def main():
     p_bench.add_argument("--model", "-m", default="qwen2.5-coder:7b", help="Model identifier to evaluate")
     p_bench.add_argument("--ip", default=None, help="Override node IP address")
 
+    # pull
+    p_pull = subparsers.add_parser("pull", help="Download an Ollama model to the remote GPU node with live progress")
+    p_pull.add_argument("model_name", help="Model name and tag to pull (e.g. qwen2.5:1.5b, deepseek-r1:7b)")
+    p_pull.add_argument("--ip", default=None, help="Override node IP address")
+
+    # cerberus / cb
+    for cb_alias in ("cerberus", "cb"):
+        p_cb = subparsers.add_parser(cb_alias, help="Dispatch inference through the 3-headed Cerberus swarm router")
+        p_cb.add_argument("prompt", nargs="?", default=None, help="Prompt or task instruction")
+        p_cb.add_argument("-t", "--tier", choices=["auto", "fast", "code", "deep"], default="auto",
+                          help="Swarm tier: fast (1.5B), code (7B coder), deep (7B reasoning), or auto-classifier")
+        p_cb.add_argument("-s", "--status", action="store_true", help="Display Cerberus 3-headed swarm readiness HUD")
+        p_cb.add_argument("-f", "--file", default=None, help="Attach local file context")
+        p_cb.add_argument("-p", "--profile", choices=["code", "review", "chat", "raw"], default="code", help="System profile")
+        p_cb.add_argument("-u", "--unload", action="store_true", help="Evict VRAM immediately after completion")
+        p_cb.add_argument("-k", "--keep-alive", default="1m", help="VRAM retention time")
+        p_cb.add_argument("--no-stream", action="store_true", help="Disable live streaming output")
+        p_cb.add_argument("--ip", default=None, help="Override node IP address")
+
+    # update
+    p_update = subparsers.add_parser("update", help="Command remote node to git pull and restart daemon seamlessly")
+    p_update.add_argument("--ip", default=None, help="Override node IP address")
+
     # run / infer / ask
     for name in ("run", "infer", "ask"):
         p_run = subparsers.add_parser(name, help="Dispatch delegated LLM inference to remote node")
         p_run.add_argument("prompt", nargs="?", default=None, help="Instruction or prompt")
         p_run.add_argument("-f", "--file", default=None, help="Path to local file to attach as context")
         p_run.add_argument("-m", "--model", default="qwen2.5-coder:7b", help="Model identifier on node")
+        p_run.add_argument("-t", "--tier", choices=["auto", "fast", "code", "deep"], default=None,
+                           help="Optional Cerberus tier override")
         p_run.add_argument("-p", "--profile", choices=["code", "review", "chat", "raw"], default="code", help="Agent system profile")
         p_run.add_argument("-u", "--unload", action="store_true", help="Evict VRAM immediately after completion (gaming safe)")
         p_run.add_argument("-k", "--keep-alive", default="1m", help="VRAM retention time (e.g. 1m, 5m, 0)")
@@ -535,6 +708,31 @@ def main():
         else:
             auth_str = " (Auth: Required)" if res.get("authenticated") else " (Auth: None)"
             print(f"✅ Node online: {res.get('node')} (status: {res.get('status')}, ver: {res.get('version')}){auth_str}")
+    elif args.subcommand == "pull":
+        cmd_pull(tower_ip, args.model_name, token=token)
+    elif args.subcommand == "update":
+        res = query_tower(tower_ip, "/update", method="POST", payload={}, token=token)
+        print(f"📡 Update status: {res.get('message', res)}")
+    elif args.subcommand in ("cerberus", "cb"):
+        if getattr(args, "status", False) or not args.prompt:
+            cmd_cerberus_status(tower_ip, token=token)
+            return
+
+        prompt_text = read_input_stream(prompt_arg=args.prompt, file_arg=args.file)
+        if not prompt_text:
+            cmd_cerberus_status(tower_ip, token=token)
+            return
+
+        cmd_cerberus(
+            prompt=prompt_text,
+            tower_ip=tower_ip,
+            tier=args.tier,
+            profile=args.profile,
+            unload=args.unload,
+            keep_alive=args.keep_alive,
+            token=token,
+            stream=not args.no_stream
+        )
     elif args.subcommand == "models":
         cmd_models(tower_ip, token=token)
     elif args.subcommand == "unload":
@@ -546,6 +744,20 @@ def main():
         if not prompt_text:
             print("❌ Missing prompt or piped input. Usage: lukk-tower run \"Prompt...\" or 'cat file | lukk-tower run'")
             sys.exit(1)
+
+        # If --tier is specified, route through Cerberus
+        if getattr(args, "tier", None):
+            cmd_cerberus(
+                prompt=prompt_text,
+                tower_ip=tower_ip,
+                tier=args.tier,
+                profile=args.profile,
+                unload=args.unload,
+                keep_alive=args.keep_alive,
+                token=token,
+                stream=not args.no_stream
+            )
+            return
 
         dispatch_workload(
             prompt=prompt_text,
