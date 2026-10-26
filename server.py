@@ -175,15 +175,27 @@ def unload_ollama_models(specific_model=None):
                 unloaded.append(f"{name} (error: {e})")
     return {"unloaded": unloaded}
 
+def kill_ollama_processes():
+    """Hard-terminates Ollama processes to immediately release 100% of CUDA contexts and driver handles."""
+    try:
+        if sys.platform == "win32":
+            subprocess.run(["taskkill", "/F", "/IM", "ollama.exe", "/IM", "ollama_llama_server.exe"],
+                           capture_output=True, text=True, check=False)
+        else:
+            subprocess.run(["pkill", "-9", "-f", "ollama"], capture_output=True, check=False)
+        return {"status": "killed", "message": "Ollama processes hard-killed and CUDA contexts purged"}
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
 def auto_gaming_sentinel_worker(interval: float = 4.0):
     """
-    Background sentinel thread: watches for active gaming processes and
-    automatically evicts models from VRAM to preserve gaming performance.
+    Background sentinel thread: watches for active gaming processes or heavy GPU loads
+    and immediately hard-terminates Ollama to purge all CUDA handles and preserve gaming performance.
     """
     while True:
         try:
             ollama = get_ollama_status()
-            if ollama.get("active") and ollama.get("loaded_models"):
+            if ollama.get("active"):
                 game_detected = False
                 if sys.platform == "win32":
                     try:
@@ -209,12 +221,13 @@ def auto_gaming_sentinel_worker(interval: float = 4.0):
                 if not game_detected:
                     # Heurística dinámica: si la GPU está siendo exigida por un juego/app pesada no listada
                     gpu = get_gpu_telemetry()
-                    if gpu.get("load_pct", 0) > 75.0:
-                        game_detected = f"High External GPU Load ({gpu['load_pct']}%)"
+                    load = gpu.get("gpu_utilization_pct", 0.0)
+                    if load > 75.0:
+                        game_detected = f"High External GPU Load ({load}%)"
 
                 if game_detected:
-                    print(f"🎮 [Auto-Gaming Sentinel] Detected active game/graphics load: '{game_detected}'! Evicting VRAM...")
-                    unload_ollama_models()
+                    print(f"🎮 [Auto-Gaming Sentinel] Detected active gaming/GPU load: '{game_detected}'! Terminating Ollama & purging CUDA contexts...")
+                    kill_ollama_processes()
         except Exception:
             pass
         time.sleep(interval)

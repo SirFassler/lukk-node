@@ -402,7 +402,7 @@ def cmd_power(action: str, ip: str, token: str = None):
     """Sends a remote shutdown or sleep command to target node."""
     endpoint = f"/power/{action}"
     print(f"📡 Sending remote '{action}' instruction to target node ({ip})...")
-    res = fetch_json(ip, endpoint, method="POST", data={}, token=token)
+    res = query_tower(ip, endpoint, method="POST", data={}, token=token)
     if "error" in res:
         print(f"❌ Failed to execute {action}: {res.get('error')}")
     else:
