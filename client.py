@@ -9,12 +9,14 @@ Version: 1.2.0
 
 import sys
 import os
+import re
 import json
 import socket
 import argparse
 import urllib.request
 import urllib.error
 import time
+from datetime import datetime
 from pathlib import Path
 
 CONFIG_FILE = Path.home() / ".config" / "lukk" / "tower.conf"
@@ -263,9 +265,83 @@ def cmd_unload(ip, token=None):
     else:
         print("🎮 VRAM cleared (0 MB AI overhead — GPU ready for gaming).")
 
-def read_input_stream(prompt_arg: str = None, file_arg: str = None) -> str:
+def parse_github_ref(ref: str):
+    """Parses a GitHub issue/PR URL or shorthand (e.g. owner/repo#123 or https://github.com/...)."""
+    if not ref:
+        return None
+    m = re.search(r"github\.com/([^/\s]+)/([^/\s]+)/(issues|pull)/(\d+)", ref)
+    if m:
+        return m.group(1), m.group(2), m.group(3), int(m.group(4))
+    m2 = re.search(r"^([a-zA-Z0-9_.-]+)/([a-zA-Z0-9_.-]+)#(\d+)$", ref.strip())
+    if m2:
+        return m2.group(1), m2.group(2), "issues", int(m2.group(3))
+    return None
+
+def fetch_github_post(owner: str, repo: str, kind: str, num: int) -> dict:
     """
-    Safely reads input from arguments, files, or stdin pipes into an immutable buffer.
+    Fetches issue/PR description, state, labels, and relevant maintainer comments
+    directly from GitHub REST API without external dependencies or tokens.
+    """
+    headers = {"User-Agent": "LukkCerberus/2.0"}
+    issue_url = f"https://api.github.com/repos/{owner}/{repo}/issues/{num}"
+    req = urllib.request.Request(issue_url, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=12) as r:
+            issue = json.loads(r.read())
+    except Exception as e:
+        print(f"⚠️ [Cerberus GitHub] Failed to fetch {owner}/{repo}#{num}: {e}")
+        return None
+
+    comments = []
+    comments_url = issue.get("comments_url")
+    if comments_url and issue.get("comments", 0) > 0:
+        req_c = urllib.request.Request(f"{comments_url}?per_page=6", headers=headers)
+        try:
+            with urllib.request.urlopen(req_c, timeout=10) as rc:
+                comments_data = json.loads(rc.read())
+                for c in comments_data:
+                    user = c.get("user", {}).get("login", "")
+                    if "bot" in user.lower() or user in ("codecov[bot]", "stale[bot]"):
+                        continue
+                    body = (c.get("body") or "").strip()
+                    if body:
+                        comments.append(f"**@{user}:**\n{body[:600]}")
+        except Exception:
+            pass
+
+    return {
+        "repo": f"{owner}/{repo}",
+        "kind": kind,
+        "number": num,
+        "title": issue.get("title", ""),
+        "state": issue.get("state", "open"),
+        "author": issue.get("user", {}).get("login", ""),
+        "labels": [l.get("name") for l in issue.get("labels", []) if isinstance(l, dict)],
+        "body": issue.get("body") or "",
+        "comments": comments
+    }
+
+def format_github_context(post_data: dict) -> str:
+    """Formats raw GitHub post data into a structured context block for Cerberus."""
+    if not post_data:
+        return ""
+    labels_str = ", ".join(post_data["labels"]) if post_data["labels"] else "None"
+    comments_str = "\n\n".join(post_data["comments"]) if post_data["comments"] else "No external maintainer comments."
+    return (
+        f"### 🎯 TARGET GITHUB REPOSITORY: {post_data['repo']}\n"
+        f"- Reference: {post_data['kind'].capitalize()} #{post_data['number']}\n"
+        f"- Title: {post_data['title']}\n"
+        f"- Author: @{post_data['author']}\n"
+        f"- State: {post_data['state'].upper()} | Labels: {labels_str}\n\n"
+        f"#### 📝 Issue Body / Problem Description:\n"
+        f"```markdown\n{post_data['body']}\n```\n\n"
+        f"#### 💬 Relevant Community & Maintainer Comments:\n"
+        f"{comments_str}\n"
+    )
+
+def read_input_stream(prompt_arg: str = None, file_arg: str = None, github_arg: str = None) -> str:
+    """
+    Safely reads input from arguments, files, GitHub posts, or stdin pipes into an immutable buffer.
     Prevents double-read stalls and stream exhaustion on FIFOs/named pipes.
     Combines piped input with prompt instructions when both are provided.
     """
@@ -284,13 +360,34 @@ def read_input_stream(prompt_arg: str = None, file_arg: str = None) -> str:
             return None
         file_data = p.read_text(encoding="utf-8", errors="replace")
 
+    github_context = ""
+    target_gh = github_arg
+    if not target_gh and prompt_arg:
+        gh_match = parse_github_ref(prompt_arg)
+        if gh_match:
+            target_gh = prompt_arg
+
+    if target_gh:
+        gh_parsed = parse_github_ref(target_gh)
+        if gh_parsed:
+            owner, repo, kind, num = gh_parsed
+            print(f"🛰️ [Cerberus GitHub] Ingestando post remoto: {owner}/{repo}#{num}...")
+            post_data = fetch_github_post(owner, repo, kind, num)
+            if post_data:
+                github_context = format_github_context(post_data)
+                print(f"✅ Contexto GitHub incorporado: '{post_data['title']}' ({len(post_data['body'])} chars)")
+
     sections = []
+    if github_context:
+        sections.append(github_context)
     if file_data:
         sections.append(f"### Attached File ({Path(file_arg).name}):\n```\n{file_data}\n```")
     if piped_data:
         sections.append(f"### Piped Input:\n```\n{piped_data}\n```")
-    if prompt_arg:
+    if prompt_arg and prompt_arg != target_gh:
         sections.append(f"### Instruction:\n{prompt_arg}")
+    elif prompt_arg == target_gh and not sections:
+        sections.append(f"### Target Issue:\n{prompt_arg}")
 
     if not sections:
         return None
@@ -371,6 +468,7 @@ def dispatch_workload(
     eval_count = 0
     tps = 0.0
     meta = None
+    collected_chunks = []
     try:
         for line in resp:
             if not line:
@@ -380,6 +478,7 @@ def dispatch_workload(
                 if "response" in chunk:
                     sys.stdout.write(chunk["response"])
                     sys.stdout.flush()
+                    collected_chunks.append(chunk["response"])
                 if "lukk_telemetry" in chunk:
                     meta = chunk["lukk_telemetry"]
             except Exception:
@@ -390,6 +489,8 @@ def dispatch_workload(
 
     if meta:
         _print_badge(meta, model)
+
+    return "".join(collected_chunks)
 
 def _print_badge(telemetry, model):
     """Outputs execution metrics."""
@@ -445,6 +546,40 @@ def cmd_wol(mac: str = None):
         print("⏳ Host hardware initiating power-on sequence. Check with 'lukk-tower ping' in ~10-15s.")
     except Exception as e:
         print(f"❌ Failed to dispatch WoL packet: {e}")
+
+def ensure_tower_available(tower_ip: str, token: str = None, auto_wake: bool = False, wait_timeout: int = 40) -> str:
+    """
+    Verifies that the target node is online. If offline and auto_wake is enabled,
+    broadcasts Wake-on-LAN magic packet and polls until operational.
+    """
+    try:
+        with socket.create_connection((tower_ip, PORT), timeout=0.8):
+            return tower_ip
+    except (socket.timeout, ConnectionRefusedError, OSError):
+        pass
+
+    if not auto_wake:
+        return tower_ip
+
+    print(f"📡 [Cerberus Autonomy] Nodo {tower_ip} no responde. Disparando Wake-on-LAN autónomo...")
+    cmd_wol()
+    start_time = time.time()
+    while time.time() - start_time < wait_timeout:
+        time.sleep(3)
+        elapsed = int(time.time() - start_time)
+        sys.stdout.write(f"\r⏳ [Cerberus Autonomy] Esperando inicialización del host ({elapsed}s/{wait_timeout}s)...")
+        sys.stdout.flush()
+        try:
+            with socket.create_connection((tower_ip, PORT), timeout=0.8):
+                res = query_tower(tower_ip, "/health", token=token)
+                if res.get("status") == "ok":
+                    print(f"\n✅ [Cerberus Autonomy] ¡Nodo {tower_ip} operativo y listo para inferencia!")
+                    return tower_ip
+        except Exception:
+            pass
+
+    print(f"\n⚠️ [Cerberus Autonomy] El nodo {tower_ip} no respondió tras {wait_timeout}s. Intentando despacho de todos modos.")
+    return tower_ip
 
 # ==============================================================================
 # PROYECTO CERBERUS: 3-HEADED DYNAMIC SWARM ROUTER
@@ -629,6 +764,125 @@ def cmd_cerberus(prompt: str, tower_ip: str, tier: str = "auto", profile: str = 
         system=CERBERUS_SYSTEM_PROMPTS.get(selected_tier, CERBERUS_SYSTEM_PROMPTS["fast"])
     )
 
+def cmd_cerberus_pipeline(
+    task_input: str,
+    tower_ip: str,
+    github_url: str = None,
+    token: str = None,
+    unload: bool = False,
+    output_path: str = None
+):
+    """
+    Autonomous 3-headed pipeline for complex GitHub issues or deep engineering problems:
+    1. Cabeza I (Fast - 1.5B): Triage, tech stack, and feasibility score.
+    2. Cabeza III (Deep - DeepSeek-R1): Root Cause Analysis, logic failure mode, and threat model.
+    3. Cabeza II (Code - Qwen 2.5 Coder 7B): Solution patch synthesis & reproduction unit tests.
+    """
+    task_context = task_input
+    target_gh = github_url
+    if not target_gh:
+        gh_match = parse_github_ref(task_input)
+        if gh_match:
+            target_gh = task_input
+
+    target_ref_name = "issue"
+    if target_gh:
+        gh_parsed = parse_github_ref(target_gh)
+        if gh_parsed:
+            owner, repo, kind, num = gh_parsed
+            target_ref_name = f"{owner}_{repo}_{num}"
+            print(f"🛰️ [Pipeline Cerberus] Ingestando contexto GitHub: {owner}/{repo}#{num}...")
+            post_data = fetch_github_post(owner, repo, kind, num)
+            if post_data:
+                task_context = format_github_context(post_data)
+
+    print("=" * 70)
+    print("🐉  PROYECTO CERBERUS: PIPELINE AUTÓNOMO DE 3 CABEZAS")
+    print(f"📡  Nodo GPU: {tower_ip} (NVIDIA GeForce RTX 3060 8GB)")
+    print("=" * 70)
+
+    # FASE 1: Cabeza I (Orthrus / Fast) - Triaje & Factibilidad
+    print("\n🟢 [FASE 1/3] Cabeza I (Orthrus / Fast 1.5B): Triaje Técnico & Factibilidad...")
+    p1 = (
+        "Analiza este issue o problema técnico de forma directa y sintética:\n"
+        "1. Lenguaje y Stack tecnológico involucrado.\n"
+        "2. Resumen del problema en 2 oraciones.\n"
+        "3. Dificultad estimada (Baja / Media / Alta / Crítica).\n"
+        "4. Índice de Factibilidad para resolver mediante PR (1 a 10) y justificación.\n\n"
+        f"{task_context}"
+    )
+    triage_output = dispatch_workload(
+        prompt=p1, ip=tower_ip, model=CERBERUS_TIERS["fast"]["model"],
+        profile="chat", stream=True, keep_alive="3m", token=token,
+        system=CERBERUS_SYSTEM_PROMPTS["fast"]
+    ) or ""
+
+    # FASE 2: Cabeza III (Typhon / Deep) - Análisis Forense & Causa Raíz
+    print("\n🟣 [FASE 2/3] Cabeza III (Typhon / DeepSeek-R1 7B): Auditoría Forense & Causa Raíz (RCA)...")
+    p2 = (
+        "Eres el auditor abisal. Realiza un Análisis de Causa Raíz (RCA) riguroso sobre este issue.\n"
+        "Analiza paso a paso (<think>):\n"
+        "- Identifica la causa raíz exacta del fallo o comportamiento erróneo (parsing, asincronía, gestión de memoria, tipos o diseño).\n"
+        "- Explica el mecanismo exacto del fallo.\n"
+        "- Define el enfoque quirúrgico de mitigación sin romper contratos existentes ni introducir regresiones.\n\n"
+        f"### Contexto Técnico:\n{task_context}\n\n"
+        f"### Triaje Preliminar:\n{triage_output}"
+    )
+    rca_output = dispatch_workload(
+        prompt=p2, ip=tower_ip, model=CERBERUS_TIERS["deep"]["model"],
+        profile="review", stream=True, keep_alive="3m", token=token,
+        system=CERBERUS_SYSTEM_PROMPTS["deep"]
+    ) or ""
+
+    # FASE 3: Cabeza II (Nemea / Coder) - Síntesis de Parche & Test de Regresión
+    print("\n🔵 [FASE 3/3] Cabeza II (Nemea / Qwen 2.5 Coder 7B): Síntesis de Parche & Tests...")
+    p3 = (
+        "Eres el cirujano de código. Basado en el issue y el análisis de causa raíz previo, sintetiza la solución de ingeniería:\n"
+        "1. Escribe la prueba unitaria de regresión (que debe fallar antes del parche y pasar después con aserciones estrictas).\n"
+        "2. Escribe el parche quirúrgico de código de producción (modular, fuertemente tipado, sin efectos secundarios).\n"
+        "Cero explicaciones redundantes o disculpas. Ve directo al código y tests.\n\n"
+        f"### Contexto Técnico:\n{task_context}\n\n"
+        f"### Causa Raíz Identificada:\n{rca_output}"
+    )
+    code_output = dispatch_workload(
+        prompt=p3, ip=tower_ip, model=CERBERUS_TIERS["code"]["model"],
+        profile="code", unload_after=unload, stream=True, keep_alive="1m", token=token,
+        system=CERBERUS_SYSTEM_PROMPTS["code"]
+    ) or ""
+
+    # Generar Dossier Final en Markdown
+    report = (
+        f"# 🐉 Dossier Autónomo Cerberus - Análisis de Issue\n\n"
+        f"* **Fecha:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+        f"* **Nodo Ejecutor:** {tower_ip} (NVIDIA GeForce RTX 3060 8GB)\n"
+        f"* **Objetivo:** `{target_ref_name}`\n\n"
+        f"---\n\n"
+        f"## 1. Triaje Técnico & Factibilidad (Cabeza I - Orthrus 1.5B)\n\n"
+        f"{triage_output}\n\n"
+        f"---\n\n"
+        f"## 2. Auditoría Forense & Causa Raíz (Cabeza III - DeepSeek-R1 7B)\n\n"
+        f"{rca_output}\n\n"
+        f"---\n\n"
+        f"## 3. Síntesis de Parche & Tests de Regresión (Cabeza II - Qwen 2.5 Coder 7B)\n\n"
+        f"{code_output}\n"
+    )
+
+    save_dest = output_path
+    if not save_dest:
+        reports_dir = Path.home() / ".agents" / "reports"
+        reports_dir.mkdir(parents=True, exist_ok=True)
+        date_stamp = datetime.now().strftime("%y%m%d_%H%M%S")
+        clean_target = re.sub(r"[^a-zA-Z0-9_-]", "_", target_ref_name)
+        save_dest = str(reports_dir / f"cerberus_{clean_target}_{date_stamp}.md")
+
+    try:
+        Path(save_dest).write_text(report, encoding="utf-8")
+        print(f"\n📄 Dossier técnico guardado exitosamente en:\n   file://{save_dest}")
+    except Exception as e:
+        print(f"\n⚠️ No se pudo guardar el informe en '{save_dest}': {e}")
+
+    return report
+
 def main():
     parser = argparse.ArgumentParser(description="LUKK-NODE CLI: Remote NVIDIA GPU Telemetry & Local LLM Orchestrator")
     parser.add_argument("--ip", default=None, help="Override node IP address")
@@ -694,6 +948,10 @@ def main():
         p_cb.add_argument("prompt", nargs="?", default=None, help="Prompt or task instruction")
         p_cb.add_argument("-t", "--tier", choices=["auto", "fast", "code", "deep"], default="auto",
                           help="Swarm tier: fast (1.5B), code (7B coder), deep (7B reasoning), or auto-classifier")
+        p_cb.add_argument("-g", "--github", default=None, help="GitHub Issue/PR URL or shorthand (e.g. owner/repo#123)")
+        p_cb.add_argument("--pipeline", action="store_true", help="Execute 3-headed autonomous pipeline (Triage -> RCA -> Code)")
+        p_cb.add_argument("-w", "--wake", action="store_true", help="Auto-wake remote GPU node via Wake-on-LAN if offline")
+        p_cb.add_argument("-o", "--output", default=None, help="Save final technical dossier to file")
         p_cb.add_argument("-s", "--status", action="store_true", help="Display Cerberus 3-headed swarm readiness HUD")
         p_cb.add_argument("-f", "--file", default=None, help="Attach local file context")
         p_cb.add_argument("-p", "--profile", choices=["code", "review", "chat", "raw"], default="code", help="System profile")
@@ -711,6 +969,8 @@ def main():
         p_run = subparsers.add_parser(name, help="Dispatch delegated LLM inference to remote node")
         p_run.add_argument("prompt", nargs="?", default=None, help="Instruction or prompt")
         p_run.add_argument("-f", "--file", default=None, help="Path to local file to attach as context")
+        p_run.add_argument("-g", "--github", default=None, help="GitHub Issue/PR URL or shorthand")
+        p_run.add_argument("-w", "--wake", action="store_true", help="Auto-wake remote GPU node if offline")
         p_run.add_argument("-m", "--model", default="qwen2.5-coder:7b", help="Model identifier on node")
         p_run.add_argument("-t", "--tier", choices=["auto", "fast", "code", "deep"], default=None,
                            help="Optional Cerberus tier override")
@@ -768,13 +1028,32 @@ def main():
         res = query_tower(tower_ip, "/update", method="POST", data={}, token=token)
         print(f"📡 Update status: {res.get('message', res)}")
     elif args.subcommand in ("cerberus", "cb"):
-        if getattr(args, "status", False) or not args.prompt:
+        has_gh = bool(getattr(args, "github", None))
+        if getattr(args, "status", False) or (not args.prompt and not has_gh):
             cmd_cerberus_status(tower_ip, token=token)
             return
 
-        prompt_text = read_input_stream(prompt_arg=args.prompt, file_arg=args.file)
+        if getattr(args, "wake", False):
+            tower_ip = ensure_tower_available(tower_ip, token=token, auto_wake=True)
+
+        prompt_text = read_input_stream(
+            prompt_arg=args.prompt,
+            file_arg=args.file,
+            github_arg=getattr(args, "github", None)
+        )
         if not prompt_text:
             cmd_cerberus_status(tower_ip, token=token)
+            return
+
+        if getattr(args, "pipeline", False):
+            cmd_cerberus_pipeline(
+                task_input=prompt_text,
+                tower_ip=tower_ip,
+                github_url=getattr(args, "github", None),
+                token=token,
+                unload=args.unload,
+                output_path=getattr(args, "output", None)
+            )
             return
 
         cmd_cerberus(
@@ -794,7 +1073,14 @@ def main():
     elif args.subcommand == "bench":
         cmd_bench(tower_ip, model=args.model, token=token)
     elif args.subcommand in ("run", "infer", "ask"):
-        prompt_text = read_input_stream(prompt_arg=args.prompt, file_arg=args.file)
+        if getattr(args, "wake", False):
+            tower_ip = ensure_tower_available(tower_ip, token=token, auto_wake=True)
+
+        prompt_text = read_input_stream(
+            prompt_arg=args.prompt,
+            file_arg=args.file,
+            github_arg=getattr(args, "github", None)
+        )
         if not prompt_text:
             print("❌ Missing prompt or piped input. Usage: lukk-tower run \"Prompt...\" or 'cat file | lukk-tower run'")
             sys.exit(1)
