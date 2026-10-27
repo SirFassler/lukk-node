@@ -20,19 +20,35 @@ from pathlib import Path
 CONFIG_FILE = Path.home() / ".config" / "lukk" / "tower.conf"
 
 def load_tower_ip():
-    """Loads the configured IP address of the target GPU node."""
+    """
+    Loads configured IP with seamless auto-failover:
+    Prefers ultra-low latency LAN IP (192.168.100.150) when at home.
+    Automatically switches to Tailscale Mesh IP (100.105.89.3) when at INACAP or on mobile data.
+    """
+    lan_ip = ""
+    ts_ip = ""
     if CONFIG_FILE.exists():
         try:
             with open(CONFIG_FILE, "r", encoding="utf-8") as f:
                 for line in f:
                     line = line.strip()
                     if line.startswith("TOWER_IP="):
-                        val = line.split("=", 1)[1].strip()
-                        if val:
-                            return val
+                        lan_ip = line.split("=", 1)[1].strip()
+                    elif line.startswith("TOWER_TAILSCALE_IP="):
+                        ts_ip = line.split("=", 1)[1].strip()
         except Exception:
             pass
-    return os.environ.get("LUKK_NODE_HOST", "127.0.0.1")
+
+    # Quick LAN heartbeat probe (250ms timeout)
+    if lan_ip and lan_ip not in ("127.0.0.1", "localhost"):
+        try:
+            with socket.create_connection((lan_ip, 9876), timeout=0.25):
+                return lan_ip
+        except Exception:
+            if ts_ip:
+                return ts_ip
+
+    return ts_ip or lan_ip or os.environ.get("LUKK_NODE_HOST", "127.0.0.1")
 
 def save_tower_ip(ip: str):
     """Saves the target GPU node IP to local configuration, preserving other settings."""
@@ -590,6 +606,14 @@ def cmd_cerberus(prompt: str, tower_ip: str, tier: str = "auto", profile: str = 
 
     print(f"🐉 [PROYECTO CERBERUS] Activando: {tier_info['name']}")
     print(f"🧠 Modelo: {target_model} | VRAM: {tier_info['vram_est']} | Perfil: {profile.upper()} | Modo: {selected_tier.upper()}")
+    
+    eta_map = {
+        "fast": "~2 a 5 segundos (alta velocidad)",
+        "code": "~6 a 12 segundos (arranque en frío: ~15s)",
+        "deep": "~20 a 45 segundos (razonamiento abisal paso a paso)"
+    }
+    eta_str = eta_map.get(selected_tier, "~8 a 15 segundos")
+    print(f"⏱️  Tiempo estimado: {eta_str}")
     print("-" * 60)
 
     dispatch_workload(
@@ -741,7 +765,7 @@ def main():
     elif args.subcommand == "pull":
         cmd_pull(tower_ip, args.model_name, token=token)
     elif args.subcommand == "update":
-        res = query_tower(tower_ip, "/update", method="POST", payload={}, token=token)
+        res = query_tower(tower_ip, "/update", method="POST", data={}, token=token)
         print(f"📡 Update status: {res.get('message', res)}")
     elif args.subcommand in ("cerberus", "cb"):
         if getattr(args, "status", False) or not args.prompt:
