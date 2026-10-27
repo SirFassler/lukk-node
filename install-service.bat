@@ -17,7 +17,7 @@ set SCRIPT_DIR=%~dp0
 set SHORTCUT=%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\LukkNode.lnk
 
 echo ==============================================================================
-echo  🛰️  LUKK-NODE: Registrando Servicio de Sistema (Boot Startup Daemon)
+echo  🛰️  LUKK-NODE: Registrando Servicio de Sistema ^(Boot Startup Daemon^)
 echo ==============================================================================
 
 :: 1. Limpiar acceso directo de usuario antiguo en Startup
@@ -30,24 +30,22 @@ if exist "%SHORTCUT%" (
 schtasks /Delete /TN "LukkNodeDaemon" /F >nul 2>&1
 
 :: 3. Crear Tarea Programada de Sistema (Disparador: ONSTART, Cuenta: SYSTEM, Privilegio: HIGHEST)
-schtasks /Create /TN "LukkNodeDaemon" /TR "wscript.exe \"%SCRIPT_DIR%start-headless.vbs\"" /SC ONSTART /RU "SYSTEM" /RL HIGHEST /F >nul 2>&1
+schtasks /Create /TN "LukkNodeDaemon" /TR "wscript.exe \"%SCRIPT_DIR%start-headless.vbs\"" /SC ONSTART /RU "SYSTEM" /RL HIGHEST /F
 
 if %ERRORLEVEL% EQU 0 (
-    echo [OK] Tarea de Sistema 'LukkNodeDaemon' registrada exitosamente.
-    echo      Disparador: En el arranque del equipo (ONSTART, sin esperar login).
-    echo      Cuenta: NT AUTHORITY\SYSTEM (Máximo privilegio).
+    echo [OK] Tarea de Sistema LukkNodeDaemon registrada exitosamente.
+    echo      Disparador: Al encender el equipo - ONSTART.
+    echo      Cuenta: NT AUTHORITY\SYSTEM.
     echo      Directorio: %SCRIPT_DIR%
     echo.
     echo [!] Iniciando demonio lukk-node en segundo plano...
-    schtasks /Run /TN "LukkNodeDaemon" >nul 2>&1
-    echo ✅ Servicio activo y corriendo de forma permanente.
+    schtasks /Run /TN "LukkNodeDaemon"
+    echo [OK] Servicio activo y corriendo de forma permanente.
     echo.
-    echo A partir de ahora, la torre arrancará lukk-node automáticamente cada vez
-    echo que se encienda por Wake-on-LAN o botón físico, sin necesidad de que nadie
-    echo inicie sesión con contraseña.
+    echo A partir de ahora, la torre arrancara lukk-node automaticamente cada vez
+    echo que se encienda por Wake-on-LAN o boton fisico, sin esperar inicio de sesion.
 ) else (
-    echo [ERROR] No se pudo registrar la tarea en el Programador de Tareas de Windows.
-    echo         Verifica que estés ejecutando como Administrador.
+    echo [ERROR] No se pudo registrar la tarea en el Programador de Tareas.
 )
 
 echo ==============================================================================
