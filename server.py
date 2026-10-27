@@ -92,6 +92,7 @@ COMMON_GAME_BINARIES = {
     "fortniteclient-win64-shipping.exe", "genshinimpact.exe", "starrail.exe",
     "javaw.exe", "java.exe", "minecraft.exe", "minecraft.windows.exe",
     "geometrydash.exe", "geometry dash.exe",
+    "escapethebackrooms.exe", "backrooms.exe", "backrooms-win64-shipping.exe",
     # Linux native / Proton processes
     "cs2", "dota2", "retroarch", "rocketleague", "minecraft", "geometrydash"
 }
