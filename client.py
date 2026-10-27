@@ -869,15 +869,24 @@ def cmd_cerberus_pipeline(
 
     save_dest = output_path
     if not save_dest:
-        reports_dir = Path.home() / ".agents" / "reports"
-        reports_dir.mkdir(parents=True, exist_ok=True)
+        obsidian_dir = Path.home() / "ObsidianVault" / "300 Notes" / "Cerberus"
+        obsidian_dir.mkdir(parents=True, exist_ok=True)
         date_stamp = datetime.now().strftime("%y%m%d_%H%M%S")
         clean_target = re.sub(r"[^a-zA-Z0-9_-]", "_", target_ref_name)
-        save_dest = str(reports_dir / f"cerberus_{clean_target}_{date_stamp}.md")
+        save_dest = str(obsidian_dir / f"cerberus_{clean_target}_{date_stamp}.md")
 
     try:
         Path(save_dest).write_text(report, encoding="utf-8")
-        print(f"\n📄 Dossier técnico guardado exitosamente en:\n   file://{save_dest}")
+        print(f"\n📄 Dossier técnico archivado en Obsidian:\n   file://{save_dest}")
+        # Enlazar en ~/.agents/reports/ para acceso rápido de scripts
+        reports_dir = Path.home() / ".agents" / "reports"
+        reports_dir.mkdir(parents=True, exist_ok=True)
+        link_dest = reports_dir / Path(save_dest).name
+        if not link_dest.exists():
+            try:
+                link_dest.symlink_to(save_dest)
+            except Exception:
+                pass
     except Exception as e:
         print(f"\n⚠️ No se pudo guardar el informe en '{save_dest}': {e}")
 
