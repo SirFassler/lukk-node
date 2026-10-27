@@ -52,6 +52,10 @@ _GPU_CACHE = {"data": None, "timestamp": 0.0}
 _GPU_CACHE_TTL = float(os.environ.get("LUKK_GPU_CACHE_TTL", 1.0))
 _CACHE_LOCK = threading.Lock()
 
+# Inference tracking lock (prevents auto-gaming sentinel from killing Ollama during legitimate AI generation)
+_ACTIVE_INFERENCES = 0
+_ACTIVE_INFERENCES_LOCK = threading.Lock()
+
 PROFILES = {
     "cerberus": (
         "Eres CERBERUS, el enjambre de tres cabezas forjado por Rodrigo (Fassler) y su copiloto Lukk. "
@@ -232,10 +236,15 @@ def auto_gaming_sentinel_worker(interval: float = 4.0):
 
                 if not game_detected:
                     # Heurística dinámica: si la GPU está siendo exigida por un juego/app pesada no listada
-                    gpu = get_gpu_telemetry()
-                    load = gpu.get("gpu_utilization_pct", 0.0)
-                    if load > 75.0:
-                        game_detected = f"High External GPU Load ({load}%)"
+                    # Excluimos la carga generada por inferencias activas legítimas despachadas a Cerberus
+                    with _ACTIVE_INFERENCES_LOCK:
+                        is_inferring = (_ACTIVE_INFERENCES > 0)
+
+                    if not is_inferring:
+                        gpu = get_gpu_telemetry()
+                        load = gpu.get("gpu_utilization_pct", 0.0)
+                        if load > 75.0:
+                            game_detected = f"High External GPU Load ({load}%)"
 
                 if game_detected:
                     print(f"🎮 [Auto-Gaming Sentinel] Detected active gaming/GPU load: '{game_detected}'! Terminating Ollama & purging CUDA contexts...")
@@ -472,86 +481,94 @@ class NodeHandler(BaseHTTPRequestHandler):
         gpu_before = get_gpu_telemetry()
         t_start = time.perf_counter()
 
+        with _ACTIVE_INFERENCES_LOCK:
+            global _ACTIVE_INFERENCES
+            _ACTIVE_INFERENCES += 1
+
         try:
-            resp = urllib.request.urlopen(ollama_req, timeout=180)
-        except urllib.error.URLError as e:
-            self._send_json(502, {
-                "error": f"Failed to connect to Ollama runtime ({OLLAMA_HOST}): {e}",
-                "hint": "Ensure the Ollama daemon is active on the node."
-            })
-            return
-
-        if stream:
-            # Streaming mode (live NDJSON relay)
-            self.send_response(200)
-            self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
-            self.send_header("Access-Control-Allow-Origin", "*")
-            self.send_header("X-Accel-Buffering", "no")
-            self.end_headers()
-
-            eval_count = 0
-            eval_duration = 0
             try:
-                for line in resp:
-                    if not line:
-                        continue
-                    self.wfile.write(line)
-                    self.wfile.flush()
+                resp = urllib.request.urlopen(ollama_req, timeout=180)
+            except urllib.error.URLError as e:
+                self._send_json(502, {
+                    "error": f"Failed to connect to Ollama runtime ({OLLAMA_HOST}): {e}",
+                    "hint": "Ensure the Ollama daemon is active on the node."
+                })
+                return
+
+            if stream:
+                # Streaming mode (live NDJSON relay)
+                self.send_response(200)
+                self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.send_header("X-Accel-Buffering", "no")
+                self.end_headers()
+
+                eval_count = 0
+                eval_duration = 0
+                try:
+                    for line in resp:
+                        if not line:
+                            continue
+                        self.wfile.write(line)
+                        self.wfile.flush()
+                        try:
+                            chunk = json.loads(line.decode("utf-8"))
+                            if chunk.get("done"):
+                                eval_count = chunk.get("eval_count", 0)
+                                eval_duration = chunk.get("eval_duration", 0)
+                        except Exception:
+                            pass
+                except (ConnectionResetError, BrokenPipeError):
+                    pass
+                finally:
+                    t_total = time.perf_counter() - t_start
+                    gpu_after = get_gpu_telemetry(force_refresh=True)
+                    tps = (eval_count / (eval_duration / 1e9)) if eval_duration > 0 else 0.0
+                    meta_event = {
+                        "lukk_telemetry": {
+                            "model": model,
+                            "eval_count": eval_count,
+                            "tokens_per_second": round(tps, 1),
+                            "total_duration_s": round(t_total, 2),
+                            "gpu_before": gpu_before,
+                            "gpu_after": gpu_after
+                        }
+                    }
                     try:
-                        chunk = json.loads(line.decode("utf-8"))
-                        if chunk.get("done"):
-                            eval_count = chunk.get("eval_count", 0)
-                            eval_duration = chunk.get("eval_duration", 0)
+                        self.wfile.write((json.dumps(meta_event) + "\n").encode("utf-8"))
+                        self.wfile.flush()
                     except Exception:
                         pass
-            except (ConnectionResetError, BrokenPipeError):
-                pass
-            finally:
+
+                    if str(keep_alive).strip() in ("0", "0s", "0m"):
+                        unload_ollama_models(model)
+            else:
+                # Buffered full JSON mode
+                full_raw = resp.read().decode("utf-8")
+                full_data = json.loads(full_raw)
                 t_total = time.perf_counter() - t_start
-                gpu_after = get_gpu_telemetry(force_refresh=True)
+                eval_count = full_data.get("eval_count", 0)
+                eval_duration = full_data.get("eval_duration", 0)
                 tps = (eval_count / (eval_duration / 1e9)) if eval_duration > 0 else 0.0
-                meta_event = {
-                    "lukk_telemetry": {
-                        "model": model,
+                gpu_after = get_gpu_telemetry(force_refresh=True)
+
+                if str(keep_alive).strip() in ("0", "0s", "0m"):
+                    unload_ollama_models(model)
+
+                self._send_json(200, {
+                    "model": model,
+                    "response": full_data.get("response", ""),
+                    "telemetry": {
                         "eval_count": eval_count,
                         "tokens_per_second": round(tps, 1),
                         "total_duration_s": round(t_total, 2),
                         "gpu_before": gpu_before,
                         "gpu_after": gpu_after
                     }
-                }
-                try:
-                    self.wfile.write((json.dumps(meta_event) + "\n").encode("utf-8"))
-                    self.wfile.flush()
-                except Exception:
-                    pass
-
-                if str(keep_alive).strip() in ("0", "0s", "0m"):
-                    unload_ollama_models(model)
-        else:
-            # Buffered full JSON mode
-            full_raw = resp.read().decode("utf-8")
-            full_data = json.loads(full_raw)
-            t_total = time.perf_counter() - t_start
-            eval_count = full_data.get("eval_count", 0)
-            eval_duration = full_data.get("eval_duration", 0)
-            tps = (eval_count / (eval_duration / 1e9)) if eval_duration > 0 else 0.0
-            gpu_after = get_gpu_telemetry(force_refresh=True)
-
-            if str(keep_alive).strip() in ("0", "0s", "0m"):
-                unload_ollama_models(model)
-
-            self._send_json(200, {
-                "model": model,
-                "response": full_data.get("response", ""),
-                "telemetry": {
-                    "eval_count": eval_count,
-                    "tokens_per_second": round(tps, 1),
-                    "total_duration_s": round(t_total, 2),
-                    "gpu_before": gpu_before,
-                    "gpu_after": gpu_after
-                }
-            })
+                })
+        finally:
+            with _ACTIVE_INFERENCES_LOCK:
+                _ACTIVE_INFERENCES = max(0, _ACTIVE_INFERENCES - 1)
 
     def log_message(self, format, *args):
         return
