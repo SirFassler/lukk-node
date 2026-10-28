@@ -77,7 +77,7 @@ lukk-tower status
 **Ejemplo de Salida:**
 ```text
 ========================================================
-🖥️  TELEMETRÍA REMOTA GPU: GAMING-RIG (192.168.1.50)
+🖥️  TELEMETRÍA REMOTA GPU: GAMING-RIG (192.0.2.1)
 ========================================================
 🎮 GPU Device:     NVIDIA GeForce RTX 3060
 🌡️  Temperature:    54°C

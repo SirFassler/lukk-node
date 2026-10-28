@@ -20,12 +20,24 @@ from datetime import datetime
 from pathlib import Path
 
 CONFIG_FILE = Path.home() / ".config" / "lukk" / "tower.conf"
+DEFAULT_PORT = 9876
+
+def parse_host_port(target: str, default_port: int = DEFAULT_PORT):
+    """Splits target string into (host, port) tuple safely."""
+    target_clean = target.replace("http://", "").replace("https://", "").split("/")[0]
+    if ":" in target_clean:
+        parts = target_clean.split(":", 1)
+        try:
+            return parts[0], int(parts[1])
+        except ValueError:
+            return parts[0], default_port
+    return target_clean, default_port
 
 def load_tower_ip():
     """
     Loads configured IP with seamless auto-failover:
-    Prefers ultra-low latency LAN IP (192.168.100.150) when at home.
-    Automatically switches to Tailscale Mesh IP (100.105.89.3) when at INACAP or on mobile data.
+    Prefers ultra-low latency LAN IP when on local network.
+    Automatically switches to Tailscale Mesh IP when on mobile data or remote networks.
     """
     lan_ip = ""
     ts_ip = ""
@@ -564,9 +576,8 @@ def cmd_wol(mac: str = None):
         packet = bytes.fromhex("FF" * 6 + clean_mac * 16)
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
             s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-            # Send to standard broadcast and common subnet broadcast
+            # Send to universal broadcast
             s.sendto(packet, ("255.255.255.255", 9))
-            s.sendto(packet, ("192.168.100.255", 9))
         print(f"⚡ Wake-on-LAN magic packet broadcasted successfully to MAC: {target_mac}")
         print("⏳ Host hardware initiating power-on sequence. Check with 'lukk-tower ping' in ~10-15s.")
     except Exception as e:
@@ -577,8 +588,9 @@ def ensure_tower_available(tower_ip: str, token: str = None, auto_wake: bool = F
     Verifies that the target node is online. If offline and auto_wake is enabled,
     broadcasts Wake-on-LAN magic packet and polls until operational.
     """
+    host, port = parse_host_port(tower_ip)
     try:
-        with socket.create_connection((tower_ip, PORT), timeout=0.8):
+        with socket.create_connection((host, port), timeout=0.8):
             return tower_ip
     except (socket.timeout, ConnectionRefusedError, OSError):
         pass
@@ -595,7 +607,7 @@ def ensure_tower_available(tower_ip: str, token: str = None, auto_wake: bool = F
         sys.stdout.write(f"\r⏳ [Cerberus Autonomy] Esperando inicialización del host ({elapsed}s/{wait_timeout}s)...")
         sys.stdout.flush()
         try:
-            with socket.create_connection((tower_ip, PORT), timeout=0.8):
+            with socket.create_connection((host, port), timeout=0.8):
                 res = query_tower(tower_ip, "/health", token=token)
                 if res.get("status") == "ok":
                     print(f"\n✅ [Cerberus Autonomy] ¡Nodo {tower_ip} operativo y listo para inferencia!")
@@ -677,7 +689,7 @@ def classify_cerberus_tier(prompt: str, tower_ip: str = None, token: str = None)
 def cmd_pull(tower_ip: str, model_name: str, token: str = None):
     """Pulls an Ollama model onto the remote tower node with live progress."""
     print(f"📥 Dispatching pull request to node {tower_ip} for model '{model_name}'...")
-    url = f"http://{tower_ip}:{PORT}/pull"
+    url = format_node_url(tower_ip, "/pull")
     payload = json.dumps({"name": model_name}).encode("utf-8")
     headers = {"Content-Type": "application/json"}
     if token:
@@ -926,7 +938,7 @@ def main():
 
     # set-ip
     p_set_ip = subparsers.add_parser("set-ip", help="Set default target GPU node IP address")
-    p_set_ip.add_argument("ip_address", help="Target node IP (e.g. 192.168.100.X or Tailscale IP)")
+    p_set_ip.add_argument("ip_address", help="Target node IP (e.g. 192.168.1.X or Tailscale IP)")
 
     # set-token
     p_set_token = subparsers.add_parser("set-token", help="Set authentication token for target node")
@@ -934,7 +946,7 @@ def main():
 
     # set-mac
     p_set_mac = subparsers.add_parser("set-mac", help="Set hardware MAC address for Wake-on-LAN")
-    p_set_mac.add_argument("mac_address", help="Target node MAC address (e.g. 9c:6b:00:a0:42:89)")
+    p_set_mac.add_argument("mac_address", help="Target node MAC address (e.g. 00:11:22:33:44:55)")
 
     # wake / wol
     for wake_cmd in ("wake", "wol"):
