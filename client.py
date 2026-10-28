@@ -80,7 +80,7 @@ def load_tower_mac() -> str:
                             return val
         except Exception:
             pass
-    return os.environ.get("LUKK_NODE_MAC", "9c:6b:00:a0:42:89")
+    return os.environ.get("LUKK_NODE_MAC", "")
 
 def save_tower_mac(mac: str):
     """Saves the target GPU node MAC to local configuration, preserving other settings."""
@@ -553,6 +553,9 @@ def cmd_power(action: str, ip: str, token: str = None):
 def cmd_wol(mac: str = None):
     """Broadcasts a Wake-on-LAN magic packet across the network to wake the node."""
     target_mac = mac or load_tower_mac()
+    if not target_mac:
+        print("❌ Error: No MAC address configured. Please run: lukk-tower set-mac <MAC>")
+        return
     clean_mac = target_mac.replace(":", "").replace("-", "").replace(".", "").strip()
     if len(clean_mac) != 12:
         print(f"❌ Error: Invalid MAC address format '{target_mac}'. Expected 12 hex digits.")
