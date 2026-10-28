@@ -307,52 +307,49 @@ def kill_ollama_processes():
     except Exception as e:
         return {"status": "error", "error": str(e)}
 
-def auto_gaming_sentinel_worker(interval: float = 4.0):
+def ensure_ollama_running():
+    """Ensures Ollama daemon is active. If killed or not running, launches it in background."""
+    ollama = get_ollama_status()
+    if ollama.get("active"):
+        return True
+    try:
+        if sys.platform == "win32":
+            subprocess.Popen(["cmd.exe", "/c", "start /b ollama serve"], shell=True)
+        else:
+            subprocess.Popen(["ollama", "serve"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        for _ in range(10):
+            time.sleep(0.5)
+            if get_ollama_status().get("active"):
+                return True
+    except Exception:
+        pass
+    return False
+
+def auto_gaming_sentinel_worker(interval: float = 3.0):
     """
-    Background sentinel thread: watches for active gaming processes or heavy GPU loads
-    and immediately hard-terminates Ollama to purge all CUDA handles and preserve gaming performance.
+    Background sentinel thread: watches for active gaming processes or heavy GPU loads.
+    Instead of hard-killing Ollama daemon, it evicts models from VRAM (keep_alive: 0)
+    to free 100% of GPU memory for gaming while keeping Ollama alive for Tier 2 coexistence.
     """
     while True:
         try:
             ollama = get_ollama_status()
-            if ollama.get("active"):
-                game_detected = False
-                if sys.platform == "win32":
-                    try:
-                        out = subprocess.check_output(["tasklist", "/FO", "CSV", "/NH"], text=True, errors="ignore")
-                        for line in out.splitlines():
-                            proc = line.split(",")[0].strip('"').lower()
-                            if proc in COMMON_GAME_BINARIES:
-                                game_detected = proc
-                                break
-                    except Exception:
-                        pass
-                else:
-                    try:
-                        out = subprocess.check_output(["ps", "-A", "-o", "comm="], text=True, errors="ignore")
-                        for proc in out.splitlines():
-                            proc = proc.strip().lower()
-                            if proc in COMMON_GAME_BINARIES:
-                                game_detected = proc
-                                break
-                    except Exception:
-                        pass
+            if ollama.get("active") and ollama.get("loaded_models"):
+                with _ACTIVE_INFERENCES_LOCK:
+                    is_inferring = (_ACTIVE_INFERENCES > 0)
 
-                if not game_detected:
-                    # Heurística dinámica: si la GPU está siendo exigida por un juego/app pesada no listada
-                    # Excluimos la carga generada por inferencias activas legítimas despachadas a Cerberus
-                    with _ACTIVE_INFERENCES_LOCK:
-                        is_inferring = (_ACTIVE_INFERENCES > 0)
-
-                    if not is_inferring:
+                if not is_inferring:
+                    sys_data = get_system_telemetry()
+                    game_detected = sys_data.get("detected_game")
+                    if not game_detected:
                         gpu = get_gpu_telemetry()
                         load = gpu.get("gpu_utilization_pct", 0.0)
                         if load > 75.0:
                             game_detected = f"High External GPU Load ({load}%)"
 
-                if game_detected:
-                    print(f"🎮 [Auto-Gaming Sentinel] Detected active gaming/GPU load: '{game_detected}'! Terminating Ollama & purging CUDA contexts...")
-                    kill_ollama_processes()
+                    if game_detected:
+                        print(f"🎮 [Auto-Gaming Sentinel] Active gaming detected: '{game_detected}'. Evicting VRAM for FPS protection...")
+                        unload_ollama_models()
         except Exception:
             pass
         time.sleep(interval)
@@ -581,6 +578,7 @@ class NodeHandler(BaseHTTPRequestHandler):
             headers={"Content-Type": "application/json"}
         )
 
+        ensure_ollama_running()
         gpu_before = get_gpu_telemetry()
         t_start = time.perf_counter()
 
