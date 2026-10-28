@@ -182,19 +182,23 @@ def get_system_telemetry(force_refresh=False):
             res["ram"]["error"] = str(e)
 
         try:
+            import csv
+            import io
             out = subprocess.check_output(["tasklist", "/FO", "CSV", "/NH"], text=True, errors="ignore")
             proc_map = {}
             detected_game = None
-            for line in out.splitlines():
-                parts = [p.strip('"') for p in line.split('","')]
+            reader = csv.reader(io.StringIO(out))
+            for parts in reader:
                 if len(parts) >= 5:
-                    name = parts[0]
+                    name = parts[0].strip()
                     name_lower = name.lower()
                     if not detected_game and name_lower in COMMON_GAME_BINARIES:
                         detected_game = name
-                    mem_str = parts[4].replace('.', '').replace(',', '').replace(' K', '').replace(' KB', '').strip()
+                    # Clean memory string (handles both 123.456 KB, 123,456 KB, and 123 456 KB)
+                    raw_mem = parts[4].replace('.', '').replace(',', '').replace(' ', '').replace('\xa0', '').upper()
+                    raw_mem = raw_mem.replace('KB', '').replace('K', '').strip()
                     try:
-                        mem_kb = int(mem_str)
+                        mem_kb = int(raw_mem)
                         mem_mb = round(mem_kb / 1024.0, 1)
                         if name in proc_map:
                             proc_map[name]["instances"] += 1
@@ -204,7 +208,7 @@ def get_system_telemetry(force_refresh=False):
                     except ValueError:
                         pass
             sorted_procs = sorted(proc_map.values(), key=lambda x: x["mem_mb"], reverse=True)
-            res["top_processes"] = sorted_procs[:12]
+            res["top_processes"] = sorted_procs[:15]
             res["detected_game"] = detected_game
         except Exception as e:
             res["top_processes_error"] = str(e)
