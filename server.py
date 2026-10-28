@@ -50,6 +50,8 @@ NODE_TOKEN = load_auth_token()
 # Telemetry Cache (reduces nvidia-smi subprocess overhead)
 _GPU_CACHE = {"data": None, "timestamp": 0.0}
 _GPU_CACHE_TTL = float(os.environ.get("LUKK_GPU_CACHE_TTL", 1.0))
+_SYS_CACHE = {"data": None, "timestamp": 0.0}
+_SYS_CACHE_TTL = 2.0
 _CACHE_LOCK = threading.Lock()
 
 # Inference tracking lock (prevents auto-gaming sentinel from killing Ollama during legitimate AI generation)
@@ -134,6 +136,103 @@ def get_gpu_telemetry(force_refresh=False):
     except Exception as e:
         return {"error": f"nvidia-smi unavailable: {e}"}
     return {"error": "No NVIDIA GPU detected"}
+
+def get_system_telemetry(force_refresh=False):
+    """Queries real-time host RAM, CPU load, active game detection and top processes."""
+    global _SYS_CACHE
+    now = time.time()
+    with _CACHE_LOCK:
+        if not force_refresh and _SYS_CACHE["data"] is not None and (now - _SYS_CACHE["timestamp"]) < _SYS_CACHE_TTL:
+            return _SYS_CACHE["data"]
+
+    res = {
+        "ram": {"total_mb": 0.0, "used_mb": 0.0, "available_mb": 0.0, "percent": 0.0},
+        "top_processes": [],
+        "detected_game": None
+    }
+
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            class MEMORYSTATUSEX(ctypes.Structure):
+                _fields_ = [
+                    ("dwLength", ctypes.c_ulong),
+                    ("dwMemoryLoad", ctypes.c_ulong),
+                    ("ullTotalPhys", ctypes.c_ulonglong),
+                    ("ullAvailPhys", ctypes.c_ulonglong),
+                    ("ullTotalPageFile", ctypes.c_ulonglong),
+                    ("ullAvailPageFile", ctypes.c_ulonglong),
+                    ("ullTotalVirtual", ctypes.c_ulonglong),
+                    ("ullAvailVirtual", ctypes.c_ulonglong),
+                    ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+                ]
+            stat = MEMORYSTATUSEX()
+            stat.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(stat)):
+                total = stat.ullTotalPhys / (1024 * 1024)
+                avail = stat.ullAvailPhys / (1024 * 1024)
+                used = max(0.0, total - avail)
+                res["ram"] = {
+                    "total_mb": round(total, 1),
+                    "used_mb": round(used, 1),
+                    "available_mb": round(avail, 1),
+                    "percent": round(stat.dwMemoryLoad, 1)
+                }
+        except Exception as e:
+            res["ram"]["error"] = str(e)
+
+        try:
+            out = subprocess.check_output(["tasklist", "/FO", "CSV", "/NH"], text=True, errors="ignore")
+            proc_map = {}
+            detected_game = None
+            for line in out.splitlines():
+                parts = [p.strip('"') for p in line.split('","')]
+                if len(parts) >= 5:
+                    name = parts[0]
+                    name_lower = name.lower()
+                    if not detected_game and name_lower in COMMON_GAME_BINARIES:
+                        detected_game = name
+                    mem_str = parts[4].replace('.', '').replace(',', '').replace(' K', '').replace(' KB', '').strip()
+                    try:
+                        mem_kb = int(mem_str)
+                        mem_mb = round(mem_kb / 1024.0, 1)
+                        if name in proc_map:
+                            proc_map[name]["instances"] += 1
+                            proc_map[name]["mem_mb"] = round(proc_map[name]["mem_mb"] + mem_mb, 1)
+                        else:
+                            proc_map[name] = {"name": name, "instances": 1, "mem_mb": mem_mb}
+                    except ValueError:
+                        pass
+            sorted_procs = sorted(proc_map.values(), key=lambda x: x["mem_mb"], reverse=True)
+            res["top_processes"] = sorted_procs[:12]
+            res["detected_game"] = detected_game
+        except Exception as e:
+            res["top_processes_error"] = str(e)
+    else:
+        # Linux host telemetry fallback
+        try:
+            with open("/proc/meminfo", "r") as f:
+                mem = {}
+                for line in f:
+                    p = line.split(":")
+                    if len(p) == 2:
+                        mem[p[0].strip()] = int(p[1].split()[0])
+            total = mem.get("MemTotal", 0) / 1024.0
+            avail = mem.get("MemAvailable", 0) / 1024.0
+            used = max(0.0, total - avail)
+            res["ram"] = {
+                "total_mb": round(total, 1),
+                "used_mb": round(used, 1),
+                "available_mb": round(avail, 1),
+                "percent": round((used / total) * 100, 1) if total > 0 else 0.0
+            }
+        except Exception:
+            pass
+
+    with _CACHE_LOCK:
+        _SYS_CACHE["data"] = res
+        _SYS_CACHE["timestamp"] = now
+    return res
 
 def get_ollama_status():
     """Queries loaded models currently residing in Ollama VRAM."""
@@ -302,10 +401,12 @@ class NodeHandler(BaseHTTPRequestHandler):
         if self.path == "/telemetry":
             gpu = get_gpu_telemetry()
             ollama = get_ollama_status()
+            sys_info = get_system_telemetry()
             self._send_json(200, {
                 "node": socket.gethostname(),
                 "gpu": gpu,
-                "ollama": ollama
+                "ollama": ollama,
+                "system": sys_info
             })
         elif self.path in ("/ollama/ps", "/ps"):
             self._send_json(200, get_ollama_status())
@@ -426,10 +527,7 @@ class NodeHandler(BaseHTTPRequestHandler):
         def _delayed_restart():
             time.sleep(1)
             subprocess.run(["git", "pull"], capture_output=True)
-            if sys.platform == "win32":
-                subprocess.Popen(["py", "server.py", "--auto-gaming"])
-            else:
-                subprocess.Popen([sys.executable, "server.py", "--auto-gaming"])
+            subprocess.Popen([sys.executable, "server.py", "--auto-gaming"])
             os._exit(0)
         threading.Thread(target=_delayed_restart, daemon=True, name="UpdateWorker").start()
         self._send_json(200, {

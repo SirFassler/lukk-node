@@ -211,6 +211,28 @@ def cmd_status(ip, token=None):
         print(f"📊 Core Load:      [{make_bar(gpu_pct, 15)}] {gpu_pct:.1f}%")
         print(f"🧠 Memory (VRAM):  [{make_bar(vram_pct, 15)}] {vram_used:.2f} GB / {vram_total:.2f} GB ({vram_pct:.1f}%)")
 
+    system = res.get("system", {})
+    if system and "ram" in system:
+        ram = system["ram"]
+        total_gb = ram.get("total_mb", 0) / 1024
+        used_gb = ram.get("used_mb", 0) / 1024
+        avail_gb = ram.get("available_mb", 0) / 1024
+        pct = ram.get("percent", 0)
+        print(f"\n--------------------------------------------------------")
+        print(f"🖲️  WINDOWS HOST RAM & TELEMETRÍA")
+        print(f"--------------------------------------------------------")
+        if total_gb > 0:
+            print(f"💾 RAM Consumida:  [{make_bar(pct, 15)}] {used_gb:.2f} GB / {total_gb:.2f} GB ({pct:.1f}%)")
+            print(f"   Memoria Libre:  {avail_gb:.2f} GB disponibles")
+        if system.get("detected_game"):
+            print(f"🎮 Juego Activo:   {system['detected_game']} (Gaming Mode Activo)")
+        top_procs = system.get("top_processes", [])
+        if top_procs:
+            print(f"\n🔥 Top Subprocesos en Memoria:")
+            for p in top_procs[:8]:
+                inst = f"({p['instances']}x)" if p.get("instances", 1) > 1 else ""
+                print(f"   • {p['name']:<24} {inst:<6} {p['mem_mb']:>7.1f} MB")
+
     print(f"\n--------------------------------------------------------")
     print(f"🤖 OLLAMA VRAM RESIDENCE STATE")
     print(f"--------------------------------------------------------")
