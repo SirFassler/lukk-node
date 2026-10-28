@@ -589,7 +589,7 @@ class NodeHandler(BaseHTTPRequestHandler):
         try:
             try:
                 resp = urllib.request.urlopen(ollama_req, timeout=180)
-            except urllib.error.URLError as e:
+            except Exception as e:
                 self._send_json(502, {
                     "error": f"Failed to connect to Ollama runtime ({OLLAMA_HOST}): {e}",
                     "hint": "Ensure the Ollama daemon is active on the node."
