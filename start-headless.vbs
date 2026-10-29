@@ -9,7 +9,7 @@ strDir = fso.GetParentFolderName(WScript.ScriptFullName)
 
 WshShell.CurrentDirectory = strDir
 ' Dual-fallback launcher with error capture:
-cmdStr = "cmd.exe /c ""((where py >nul 2>&1 && py server.py --auto-gaming) || python server.py --auto-gaming) 2> lukk_startup_error.log"""
+cmdStr = "cmd.exe /c ""((where py >nul 2>&1 && py server.py --auto-gaming) || python server.py --auto-gaming) 2> ""%TEMP%\lukk_startup_error.log""""
 WshShell.Run cmdStr, 0, False
 
 Set WshShell = Nothing
