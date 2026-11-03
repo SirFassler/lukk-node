@@ -469,6 +469,8 @@ class NodeHandler(BaseHTTPRequestHandler):
             self._handle_pull()
         elif self.path == "/update":
             self._handle_update()
+        elif self.path == "/admin/exec":
+            self._handle_admin_exec()
         else:
             self._send_json(404, {"error": "Route not found"})
 
@@ -535,6 +537,37 @@ class NodeHandler(BaseHTTPRequestHandler):
             "status": "updating",
             "message": "Node pulling git updates and restarting daemon seamlessly."
         })
+
+    def _handle_admin_exec(self):
+        """Executes administrative automation commands on the host (protected by Bearer token)."""
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+            if length == 0:
+                self._send_json(400, {"error": "Empty request body"})
+                return
+            body = json.loads(self.rfile.read(length).decode("utf-8"))
+            cmd = body.get("command")
+            if not cmd:
+                self._send_json(400, {"error": "Command is required"})
+                return
+            use_ps = body.get("powershell", False)
+            timeout = int(body.get("timeout", 180))
+            if use_ps and sys.platform == "win32":
+                full_cmd = ["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", cmd]
+            else:
+                full_cmd = cmd if isinstance(cmd, list) else (["cmd.exe", "/c", cmd] if sys.platform == "win32" else ["/bin/bash", "-c", cmd])
+            
+            res = subprocess.run(full_cmd, capture_output=True, text=True, timeout=timeout)
+            self._send_json(200, {
+                "status": "ok",
+                "exit_code": res.returncode,
+                "stdout": res.stdout,
+                "stderr": res.stderr
+            })
+        except subprocess.TimeoutExpired:
+            self._send_json(408, {"error": "Command execution timed out"})
+        except Exception as e:
+            self._send_json(500, {"error": str(e)})
 
     def _handle_infer(self):
         """Orchestrates delegated inference execution to Ollama with streaming or buffering."""
