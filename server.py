@@ -437,6 +437,43 @@ class NodeHandler(BaseHTTPRequestHandler):
                 "details": res,
                 "gpu_after_unload": gpu
             })
+        elif self.path in ("/cerberus/start", "/power/start-cerberus"):
+            # Forensic pre-flight check
+            sys_info = get_system_telemetry()
+            gpu_info = get_gpu_telemetry(force_refresh=True)
+            detected_game = sys_info.get("detected_game")
+            if detected_game:
+                self._send_json(409, {
+                    "status": "blocked",
+                    "reason": f"Game/3D process actively running: {detected_game}",
+                    "gpu": gpu_info
+                })
+                return
+            if gpu_info.get("vram_free_mb", 0) < 4000:
+                self._send_json(409, {
+                    "status": "blocked",
+                    "reason": f"Insufficient VRAM available: only {gpu_info.get('vram_free_mb')} MB free (min 4000 MB)",
+                    "gpu": gpu_info
+                })
+                return
+            started = ensure_ollama_running()
+            time.sleep(1.0)
+            self._send_json(200, {
+                "status": "started" if started else "error",
+                "message": "Cerberus Ollama daemon activated successfully" if started else "Failed to start Ollama daemon",
+                "ollama": get_ollama_status(),
+                "gpu": get_gpu_telemetry(force_refresh=True)
+            })
+
+        elif self.path in ("/cerberus/stop", "/power/stop-cerberus"):
+            res = kill_ollama_processes()
+            time.sleep(1.0)
+            self._send_json(200, {
+                "status": "stopped",
+                "details": res,
+                "gpu_after_stop": get_gpu_telemetry(force_refresh=True)
+            })
+
         elif self.path == "/power/shutdown":
             self._send_json(200, {
                 "status": "shutting_down",
@@ -529,8 +566,9 @@ class NodeHandler(BaseHTTPRequestHandler):
         """Pulls git updates and restarts the lukk-node daemon asynchronously."""
         def _delayed_restart():
             time.sleep(1)
-            subprocess.run(["git", "pull"], capture_output=True)
-            subprocess.Popen([sys.executable, "server.py", "--auto-gaming"])
+            repo_dir = str(Path(__file__).resolve().parent)
+            subprocess.run(["git", "pull"], cwd=repo_dir, capture_output=True)
+            subprocess.Popen([sys.executable, "server.py", "--auto-gaming"], cwd=repo_dir)
             os._exit(0)
         threading.Thread(target=_delayed_restart, daemon=True, name="UpdateWorker").start()
         self._send_json(200, {
